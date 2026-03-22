@@ -63,3 +63,28 @@ def test_live_qemu_backend_list_memory_maps_schema(live_qemu_start_kwargs: dict[
         assert target in names or "[stack]" in names
     finally:
         backend.close()
+
+
+@pytest.mark.live_qemu
+def test_live_qemu_backend_single_step(live_qemu_start_kwargs: dict[str, object]) -> None:
+    backend = QemuUserInstrumentedBackend()
+    backend.start(**live_qemu_start_kwargs)
+    try:
+        caps = backend.capabilities()
+        assert caps["single_step"] is True
+
+        rip = backend.get_registers(["rip"])["result"]["registers"]["rip"]
+        disassembly = backend.disassemble(rip, count=2)
+        instructions = disassembly["result"]["instructions"]
+        assert len(instructions) >= 2
+        next_pc = str(instructions[1]["address"])
+
+        step = backend.step(1, timeout=5.0)
+        regs_after = backend.get_registers(["rip"])
+
+        assert step["result"]["status"] == "paused"
+        assert step["result"]["executed"] == 1
+        assert step["result"]["pc"] == next_pc
+        assert regs_after["result"]["registers"]["rip"] == next_pc
+    finally:
+        backend.close()

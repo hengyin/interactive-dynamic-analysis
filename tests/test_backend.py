@@ -140,8 +140,8 @@ class FakeInstrumentationRpcClient:
                     "trace_branch": False,
                     "trace_memory": False,
                     "trace_syscall": False,
-                    "run_until_address": True,
-                    "single_step": False,
+                "run_until_address": True,
+                    "single_step": True,
                 },
             }
         if method == "resume":
@@ -154,6 +154,8 @@ class FakeInstrumentationRpcClient:
             return {"status": "paused", "blocks_executed": params["count"], "pc": "0x401010"}
         if method == "resume_until_address":
             return {"status": "paused", "pc": params["address"]}
+        if method == "single_step":
+            return {"status": "paused", "count": params["count"], "executed": params["count"], "pc": "0x401004"}
         if method == "query_status":
             return {"status": "paused"}
         if method == "get_registers":
@@ -349,6 +351,22 @@ def test_backend_disassemble_uses_rpc_in_rpc_only_mode() -> None:
     assert rpc.requests[-1] == ("disassemble", {"address": "0x401000", "count": 2})
     assert result["result"]["instructions"][0]["address"] == "0x401000"
     assert result["result"]["instructions"][1]["text"] == "nop"
+
+
+def test_backend_step_uses_rpc_in_rpc_only_mode() -> None:
+    rpc = FakeInstrumentationRpcClient()
+    backend = QemuUserInstrumentedBackend(
+        qmp_client=None,
+        instrumentation_client=None,
+        instrumentation_rpc_client=rpc,
+    )
+    backend.start("target.bin", [], None, {"capabilities_override": {"single_step": True}})
+
+    result = backend.step(2, timeout=1.0)
+
+    assert rpc.requests[-1] == ("single_step", {"count": 2})
+    assert result["result"]["executed"] == 2
+    assert result["state"]["pc"] == "0x401004"
 
 
 def test_backend_rpc_failure_includes_process_exit_summary() -> None:

@@ -37,7 +37,7 @@ class QemuUserInstrumentedBackend:
             trace_memory=True,
             trace_syscall=True,
             run_until_address=True,
-            single_step=False,
+            single_step=True,
         )
         self._qmp = qmp_client
         self._controller = QmpController(qmp_client) if qmp_client is not None else None
@@ -100,8 +100,9 @@ class QemuUserInstrumentedBackend:
             self._capabilities.trace_branch = False
             self._capabilities.trace_memory = False
             self._capabilities.trace_syscall = False
-            self._capabilities.run_until_address = False
-            self._capabilities.single_step = False
+            if self._instrumentation_rpc is None:
+                self._capabilities.run_until_address = False
+                self._capabilities.single_step = False
         overrides = qemu_config.get("capabilities_override")
         if overrides:
             for key, value in dict(overrides).items():
@@ -264,7 +265,14 @@ class QemuUserInstrumentedBackend:
         self._require_started()
         if not self._capabilities.single_step:
             raise UnsupportedOperationError("backend does not support single stepping")
-        return self._response({"count": count})
+        result = self._rpc_request("single_step", {"count": count})
+        status = result.get("status")
+        if isinstance(status, str):
+            self._state["session_status"] = status
+        pc = result.get("pc")
+        if isinstance(pc, str):
+            self._state["pc"] = pc
+        return self._response(result)
 
     def advance_basic_blocks(self, count: int, timeout: float) -> dict[str, Any]:
         del timeout

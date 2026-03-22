@@ -46,8 +46,15 @@ def rpc_main() -> int:
                     "trace_memory": False,
                     "trace_syscall": False,
                     "run_until_address": True,
-                    "single_step": False,
+                    "single_step": True,
                 },
+            }
+        elif method == "single_step":
+            result = {
+                "status": "paused",
+                "count": params["count"],
+                "executed": params["count"],
+                "pc": "0x401004",
             }
         elif method == "pause":
             result = {}
