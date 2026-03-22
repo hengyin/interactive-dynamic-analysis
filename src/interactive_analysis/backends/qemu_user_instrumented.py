@@ -49,6 +49,7 @@ class QemuUserInstrumentedBackend:
             "session_status": "not_started",
             "backend": "qemu_user_instrumented",
             "rpc_protocol_version": None,
+            "rpc_capabilities": {},
             "recent_events": [],
             "ingestion_stats": {},
             "capabilities": self._capabilities.to_dict(),
@@ -138,6 +139,7 @@ class QemuUserInstrumentedBackend:
         if self._instrumentation_rpc is not None:
             rpc_caps = self._rpc_request("capabilities")
             self._validate_rpc_capabilities(rpc_caps)
+            self._apply_rpc_capabilities(rpc_caps)
         self._state.update(
             {
                 "session_status": "idle",
@@ -145,6 +147,7 @@ class QemuUserInstrumentedBackend:
                 "args": list(args),
                 "cwd": cwd,
                 "rpc_protocol_version": self._RPC_PROTOCOL_VERSION if self._instrumentation_rpc is not None else None,
+                "rpc_capabilities": dict(rpc_caps.get("capabilities", {})) if self._instrumentation_rpc is not None else {},
                 "recent_events": [],
                 "ingestion_stats": self._instrumentation.stats.to_dict() if self._instrumentation is not None else {},
                 "capabilities": self._capabilities.to_dict(),
@@ -453,6 +456,14 @@ class QemuUserInstrumentedBackend:
                 f"incompatible instrumentation RPC protocol version: got {version}, "
                 f"expected {self._RPC_PROTOCOL_VERSION}"
             )
+
+    def _apply_rpc_capabilities(self, rpc_caps: dict[str, Any]) -> None:
+        caps = rpc_caps.get("capabilities")
+        if not isinstance(caps, dict):
+            return
+        for name in self._capabilities.to_dict().keys():
+            if name in caps and isinstance(caps[name], bool):
+                setattr(self._capabilities, name, getattr(self._capabilities, name) and caps[name])
 
     @staticmethod
     def _wait_for_socket_path(socket_path: str, timeout: float) -> None:

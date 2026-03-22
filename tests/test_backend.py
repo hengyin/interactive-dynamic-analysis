@@ -126,7 +126,24 @@ class FakeInstrumentationRpcClient:
         if method != "capabilities":
             self.requests.append((method, params))
         if method == "capabilities":
-            return {"protocol_version": 1}
+            return {
+                "protocol_version": 1,
+                "capabilities": {
+                    "pause_resume": True,
+                    "read_registers": True,
+                    "read_memory": True,
+                    "disassemble": True,
+                    "list_memory_maps": True,
+                    "take_snapshot": False,
+                    "restore_snapshot": False,
+                    "trace_basic_block": False,
+                    "trace_branch": False,
+                    "trace_memory": False,
+                    "trace_syscall": False,
+                    "run_until_address": True,
+                    "single_step": False,
+                },
+            }
         if method == "resume":
             return {}
         if method == "pause":
@@ -252,6 +269,8 @@ def test_backend_start_allows_rpc_only_mode() -> None:
     assert state["session_status"] == "paused"
     assert state["capabilities"]["trace_branch"] is False
     assert state["capabilities"]["pause_resume"] is False
+    assert state["rpc_protocol_version"] == 1
+    assert state["rpc_capabilities"]["read_memory"] is True
     assert registers["result"]["registers"]["rip"] == "0x401000"
 
 

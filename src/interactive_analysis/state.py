@@ -9,6 +9,7 @@ class ExecutionState:
     session_status: str = "not_started"
     backend: str | None = None
     rpc_protocol_version: int | None = None
+    rpc_capabilities: dict[str, bool] = field(default_factory=dict)
     target: str | None = None
     args: list[str] = field(default_factory=list)
     cwd: str | None = None
@@ -31,6 +32,7 @@ class ExecutionState:
             "session_status": self.session_status,
             "backend": self.backend,
             "rpc_protocol_version": self.rpc_protocol_version,
+            "rpc_capabilities": dict(self.rpc_capabilities),
             "target": self.target,
             "args": list(self.args),
             "cwd": self.cwd,

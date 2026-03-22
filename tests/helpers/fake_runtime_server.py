@@ -31,7 +31,24 @@ def rpc_main() -> int:
         if method == "resume":
             result = {}
         elif method == "capabilities":
-            result = {"protocol_version": 1}
+            result = {
+                "protocol_version": 1,
+                "capabilities": {
+                    "pause_resume": True,
+                    "read_registers": True,
+                    "read_memory": True,
+                    "disassemble": True,
+                    "list_memory_maps": True,
+                    "take_snapshot": False,
+                    "restore_snapshot": False,
+                    "trace_basic_block": False,
+                    "trace_branch": False,
+                    "trace_memory": False,
+                    "trace_syscall": False,
+                    "run_until_address": True,
+                    "single_step": False,
+                },
+            }
         elif method == "pause":
             result = {}
         elif method == "query_status":
