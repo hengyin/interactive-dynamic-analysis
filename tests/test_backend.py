@@ -611,7 +611,7 @@ def test_backend_write_stdin_allows_paused_session_state() -> None:
     assert runner.stdin_writes == ["1\n"]
 
 
-def test_backend_write_stdin_rejects_idle_session_state() -> None:
+def test_backend_write_stdin_allows_idle_session_state() -> None:
     runner = FakeProcessRunner()
     backend = QemuUserInstrumentedBackend(
         qmp_client=None,
@@ -621,9 +621,9 @@ def test_backend_write_stdin_rejects_idle_session_state() -> None:
     )
     backend.start("target.bin", [], None, {"launch": True, "qemu_user_path": "/usr/bin/qemu-x86_64"})
     backend._state["session_status"] = "idle"
-
-    with pytest.raises(InvalidStateError, match="session is not active"):
-        backend.write_stdin("1\n")
+    result = backend.write_stdin("1\n")
+    assert result["result"]["written"] == 2
+    assert runner.stdin_writes == ["1\n"]
 
 
 def test_backend_get_registers_uses_rpc_channel() -> None:

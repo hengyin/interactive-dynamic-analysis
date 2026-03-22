@@ -579,7 +579,8 @@ class InteractiveAnalysisMcpServer:
                 name="send_bytes",
                 description=(
                     "Pwntools-style raw send. Write UTF-8 bytes/text to target stdin immediately. "
-                    "Session must be running. Use for long payloads; include '\\n' explicitly when needed."
+                    "Session must be active (idle/running/paused). "
+                    "Use for long payloads; include '\\n' explicitly when needed."
                 ),
                 input_schema={
                     "type": "object",
@@ -599,6 +600,7 @@ class InteractiveAnalysisMcpServer:
                 description=(
                     "Pwntools-style line send. Appends a single '\\n' and writes to stdin. "
                     "If `line` is omitted, sends only newline. "
+                    "Session must be active (idle/running/paused). "
                     "For menu flows, prefer send_line over send_bytes."
                 ),
                 input_schema={
@@ -617,6 +619,7 @@ class InteractiveAnalysisMcpServer:
                 name="send_file",
                 description=(
                     "Stream a local UTF-8 text file into target stdin using fixed internal chunks. "
+                    "Session must be active (idle/running/paused). "
                     "Use this for large payloads that are too long for a single send_bytes call."
                 ),
                 input_schema={
