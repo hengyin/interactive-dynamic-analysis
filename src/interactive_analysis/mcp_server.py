@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,6 +37,8 @@ class InteractiveAnalysisMcpServer:
     def __init__(self, session_factory: Callable[[], AnalysisSession] | None = None) -> None:
         self._session_factory = session_factory or (lambda: AnalysisSession(backend=QemuUserInstrumentedBackend()))
         self._session: AnalysisSession | None = None
+        self._stdout_cursor = 0
+        self._stderr_cursor = 0
         self._tools: dict[str, ToolSpec] = {tool.name: tool for tool in self._build_tools()}
 
     def handle_request(self, request: JSON) -> JSON | None:
@@ -129,11 +130,13 @@ class InteractiveAnalysisMcpServer:
                         cwd=cwd,
                         qemu_config=qemu_config,
                     )
+                self._reset_stream_cursors()
                 return self._tool_ok(result)
 
             if name == "close":
                 session = self._ensure_session()
                 result = session.close()
+                self._reset_stream_cursors()
                 return self._tool_ok(result)
 
             if name == "caps":
@@ -148,7 +151,13 @@ class InteractiveAnalysisMcpServer:
                     )
                 )
             if name == "run":
-                return self._tool_ok(self._ensure_session().resume(timeout=float(arguments.get("timeout", 5.0))))
+                session = self._ensure_session()
+                timeout = float(arguments.get("timeout", 5.0))
+                bp_list_result = session.bp_list()
+                breakpoints = bp_list_result.get("result", {}).get("breakpoints", [])
+                if isinstance(breakpoints, list) and len(breakpoints) > 0:
+                    return self._tool_ok(session.bp_run(timeout=timeout))
+                return self._tool_ok(session.resume(timeout=timeout))
             if name == "pause":
                 return self._tool_ok(self._ensure_session().pause(timeout=float(arguments.get("timeout", 5.0))))
             if name == "regs":
@@ -172,13 +181,6 @@ class InteractiveAnalysisMcpServer:
                 )
             if name == "maps":
                 return self._tool_ok(self._ensure_session().list_memory_maps())
-            if name == "until":
-                return self._tool_ok(
-                    self._ensure_session().run_until_address(
-                        address=str(arguments["address"]),
-                        timeout=float(arguments.get("timeout", 5.0)),
-                    )
-                )
             if name == "step":
                 return self._tool_ok(
                     self._ensure_session().step(
@@ -201,60 +203,44 @@ class InteractiveAnalysisMcpServer:
                 return self._tool_ok(self._ensure_session().bp_list())
             if name == "bp_clear":
                 return self._tool_ok(self._ensure_session().bp_clear())
-            if name == "bp_run":
-                return self._tool_ok(
-                    self._ensure_session().bp_run(
-                        timeout=float(arguments.get("timeout", 5.0)),
-                        max_steps=int(arguments.get("max_steps", 10000)),
-                    )
-                )
-            if name == "stdin":
+            if name == "send_bytes":
                 data = arguments.get("data")
                 if not isinstance(data, str) or data == "":
                     return self._tool_error(
-                        "write_stdin requires non-empty string argument `data` "
+                        "send_bytes requires non-empty string argument `data` "
                         '(example: {"data":"1\\n"})'
                     )
                 return self._tool_ok(self._ensure_session().write_stdin(data=data))
-            if name == "stdin_file":
-                path_value = arguments.get("path")
-                if not isinstance(path_value, str) or path_value.strip() == "":
+            if name == "send_line":
+                line = arguments.get("line", "")
+                if not isinstance(line, str):
                     return self._tool_error(
-                        "write_stdin_file requires non-empty string argument `path` "
-                        '(example: {"path":"/tmp/pov_input.txt"})'
+                        "send_line requires string argument `line` "
+                        '(example: {"line":"1"})'
                     )
-                chunk_size = int(arguments.get("chunk_size", 4096))
-                if chunk_size < 1:
-                    return self._tool_error("write_stdin_file.chunk_size must be >= 1")
-                path = Path(path_value)
-                if not path.exists() or not path.is_file():
-                    return self._tool_error(f"write_stdin_file path is not a readable file: {path_value}")
-                total_written = 0
-                session = self._ensure_session()
-                with path.open("r", encoding="utf-8", errors="replace") as fp:
-                    while True:
-                        chunk = fp.read(chunk_size)
-                        if not chunk:
-                            break
-                        write_result = session.write_stdin(data=chunk)
-                        total_written += int(write_result["result"].get("written", 0))
-                return self._tool_ok({"written": total_written, "path": str(path), "chunk_size": chunk_size})
-            if name == "stdin_close":
-                return self._tool_ok(self._ensure_session().close_stdin())
+                return self._tool_ok(self._ensure_session().write_stdin(data=f"{line}\n"))
             if name == "stdout":
-                return self._tool_ok(
-                    self._ensure_session().read_stdout(
-                        cursor=int(arguments.get("cursor", 0)),
-                        max_chars=int(arguments.get("max_chars", 4096)),
-                    )
+                result = self._ensure_session().read_stdout(
+                    cursor=self._stdout_cursor,
+                    max_chars=int(arguments.get("max_chars", 4096)),
                 )
+                payload = result.get("result")
+                if isinstance(payload, dict):
+                    cursor = payload.get("cursor")
+                    if isinstance(cursor, int) and cursor >= 0:
+                        self._stdout_cursor = cursor
+                return self._tool_ok(result)
             if name == "stderr":
-                return self._tool_ok(
-                    self._ensure_session().read_stderr(
-                        cursor=int(arguments.get("cursor", 0)),
-                        max_chars=int(arguments.get("max_chars", 4096)),
-                    )
+                result = self._ensure_session().read_stderr(
+                    cursor=self._stderr_cursor,
+                    max_chars=int(arguments.get("max_chars", 4096)),
                 )
+                payload = result.get("result")
+                if isinstance(payload, dict):
+                    cursor = payload.get("cursor")
+                    if isinstance(cursor, int) and cursor >= 0:
+                        self._stderr_cursor = cursor
+                return self._tool_ok(result)
             return self._tool_error(f"tool not implemented: {name}")
         except KeyError as exc:
             return self._tool_error(f"missing required argument: {exc.args[0]}")
@@ -269,6 +255,11 @@ class InteractiveAnalysisMcpServer:
         except Exception:
             pass
         self._session = None
+        self._reset_stream_cursors()
+
+    def _reset_stream_cursors(self) -> None:
+        self._stdout_cursor = 0
+        self._stderr_cursor = 0
 
     @staticmethod
     def _tool_ok(payload: JSON) -> JSON:
@@ -301,7 +292,7 @@ class InteractiveAnalysisMcpServer:
                 name="start",
                 description=(
                     "Start an analysis session for a target binary. "
-                    "After start, session is typically paused; call resume before write_stdin."
+                    "After start, session is typically paused; call run before send_bytes/send_line."
                 ),
                 input_schema={
                     "type": "object",
@@ -386,7 +377,10 @@ class InteractiveAnalysisMcpServer:
             ),
             ToolSpec(
                 name="run",
-                description="Resume target execution (expected state transition: paused -> running).",
+                description=(
+                    "Run target execution. If breakpoints are configured, run until next breakpoint; "
+                    "otherwise plain resume."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -472,24 +466,6 @@ class InteractiveAnalysisMcpServer:
                 input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             ),
             ToolSpec(
-                name="until",
-                description="Resume execution and pause when an address is reached.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "address": {"type": "string", "description": "Guest instruction address to stop at."},
-                        "timeout": {
-                            "type": "number",
-                            "exclusiveMinimum": 0,
-                            "description": "Maximum wait in seconds.",
-                            "default": 5.0,
-                        },
-                    },
-                    "required": ["address"],
-                    "additionalProperties": False,
-                },
-            ),
-            ToolSpec(
                 name="step",
                 description="Single-step a number of instructions.",
                 input_schema={
@@ -564,79 +540,48 @@ class InteractiveAnalysisMcpServer:
                 input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             ),
             ToolSpec(
-                name="bp_run",
-                description="Run until a selected address from configured breakpoints is reached (nearest forward strategy).",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "timeout": {"type": "number", "exclusiveMinimum": 0, "default": 5.0},
-                        "max_steps": {"type": "integer", "minimum": 0, "default": 10000},
-                    },
-                    "additionalProperties": False,
-                },
-            ),
-            ToolSpec(
-                name="stdin",
+                name="send_bytes",
                 description=(
-                    "Write UTF-8 text to target stdin. Session must be running (call resume first). "
-                    "Argument `data` is required."
+                    "Pwntools-style raw send. Write UTF-8 bytes/text to target stdin immediately. "
+                    "Session must be running."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
                         "data": {
                             "type": "string",
-                            "description": (
-                                "Input bytes as text. Include '\\n' explicitly for line-oriented programs."
-                            ),
+                            "description": "Raw data to write exactly as provided.",
                             "minLength": 1,
+                        }
+                    },
+                    "required": ["data"],
+                    "additionalProperties": False,
+                },
+            ),
+            ToolSpec(
+                name="send_line",
+                description=(
+                    "Pwntools-style line send. Appends a single '\\n' and writes to stdin. "
+                    "If `line` is omitted, sends only newline."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "line": {
+                            "type": "string",
+                            "description": "Line content without trailing newline.",
+                            "default": "",
                         }
                     },
                     "additionalProperties": False,
                 },
             ),
             ToolSpec(
-                name="stdin_close",
-                description="Close target stdin (send EOF).",
-                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-            ),
-            ToolSpec(
-                name="stdin_file",
-                description=(
-                    "Write stdin from a local UTF-8 text file in chunks. "
-                    "Use this for large PoV inputs to avoid inline argument formatting issues."
-                ),
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Absolute or relative path to input file.",
-                            "minLength": 1,
-                        },
-                        "chunk_size": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "description": "Chunk size per write_stdin call.",
-                            "default": 4096,
-                        },
-                    },
-                    "required": ["path"],
-                    "additionalProperties": False,
-                },
-            ),
-            ToolSpec(
                 name="stdout",
-                description="Read buffered stdout chunk. Reuse returned cursor for incremental polling.",
+                description="Read next buffered stdout chunk (server maintains cursor internally).",
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "cursor": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "description": "Byte cursor from previous read; start with 0.",
-                            "default": 0,
-                        },
                         "max_chars": {
                             "type": "integer",
                             "minimum": 1,
@@ -649,16 +594,10 @@ class InteractiveAnalysisMcpServer:
             ),
             ToolSpec(
                 name="stderr",
-                description="Read buffered stderr chunk. Reuse returned cursor for incremental polling.",
+                description="Read next buffered stderr chunk (server maintains cursor internally).",
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "cursor": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "description": "Byte cursor from previous read; start with 0.",
-                            "default": 0,
-                        },
                         "max_chars": {
                             "type": "integer",
                             "minimum": 1,

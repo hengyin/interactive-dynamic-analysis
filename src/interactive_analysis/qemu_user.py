@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import fcntl
 import os
+import pty
 import shutil
 import subprocess
+import tty
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -85,40 +87,53 @@ class QemuUserLaunchConfig:
 
 class QemuUserProcessRunner:
     def __init__(self) -> None:
-        self._process: subprocess.Popen[str] | None = None
+        self._process: subprocess.Popen[bytes] | None = None
         self._config: QemuUserLaunchConfig | None = None
         self._stdout_buffer = ""
         self._stderr_buffer = ""
+        self._stdout_master_fd: int | None = None
+        self._stdout_slave_fd: int | None = None
 
     @property
     def running(self) -> bool:
         return self._process is not None and self._process.poll() is None
 
     @property
-    def process(self) -> subprocess.Popen[str] | None:
+    def process(self) -> subprocess.Popen[bytes] | None:
         return self._process
 
     @property
     def config(self) -> QemuUserLaunchConfig | None:
         return self._config
 
-    def start(self, config: QemuUserLaunchConfig) -> subprocess.Popen[str]:
+    def start(self, config: QemuUserLaunchConfig) -> subprocess.Popen[bytes]:
         if self.running:
             raise RuntimeError("qemu-user process is already running")
         self._config = config
         self._stdout_buffer = ""
         self._stderr_buffer = ""
-        self._process = subprocess.Popen(
-            config.command(),
-            cwd=config.cwd,
-            env=config.environment(),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None if config.inherit_stderr else subprocess.PIPE,
-            text=True,
-        )
-        if self._process.stdout is not None:
-            self._set_nonblocking(self._process.stdout.fileno())
+        self._close_stdout_pty()
+        stdout_master, stdout_slave = pty.openpty()
+        tty.setraw(stdout_master)
+        tty.setraw(stdout_slave)
+        self._stdout_master_fd = stdout_master
+        self._stdout_slave_fd = stdout_slave
+        try:
+            self._process = subprocess.Popen(
+                config.command(),
+                cwd=config.cwd,
+                env=config.environment(),
+                stdin=subprocess.PIPE,
+                stdout=stdout_slave,
+                stderr=None if config.inherit_stderr else subprocess.PIPE,
+                text=False,
+            )
+        except Exception:
+            self._close_stdout_pty()
+            raise
+        self._close_stdout_slave_fd()
+        if self._stdout_master_fd is not None:
+            self._set_nonblocking(self._stdout_master_fd)
         if self._process.stderr is not None:
             self._set_nonblocking(self._process.stderr.fileno())
         return self._process
@@ -133,6 +148,7 @@ class QemuUserProcessRunner:
             except subprocess.TimeoutExpired:
                 self._process.kill()
                 self._process.wait(timeout=2.0)
+        self._close_stdout_pty()
         self._process = None
         self._config = None
 
@@ -142,16 +158,11 @@ class QemuUserProcessRunner:
         if self._process.poll() is not None:
             raise RuntimeError("qemu-user process is not running")
         try:
-            written = self._process.stdin.write(data)
+            written = self._process.stdin.write(data.encode("utf-8", errors="replace"))
             self._process.stdin.flush()
         except BrokenPipeError as exc:
             raise RuntimeError("stdin is closed (target likely exited)") from exc
         return int(written or 0)
-
-    def close_stdin(self) -> None:
-        if self._process is None or self._process.stdin is None:
-            return
-        self._process.stdin.close()
 
     def read_stdout(self, cursor: int = 0, max_chars: int = 4096) -> dict[str, Any]:
         self._drain_available_output()
@@ -180,8 +191,8 @@ class QemuUserProcessRunner:
     def _drain_available_output(self) -> None:
         if self._process is None:
             return
-        if self._process.stdout is not None:
-            self._drain_stream_fd(self._process.stdout.fileno(), "stdout")
+        if self._stdout_master_fd is not None:
+            self._drain_stream_fd(self._stdout_master_fd, "stdout")
         if self._process.stderr is not None:
             self._drain_stream_fd(self._process.stderr.fileno(), "stderr")
 
@@ -216,6 +227,25 @@ class QemuUserProcessRunner:
         data = payload[cursor:end]
         eof = self._process is None or self._process.poll() is not None
         return {"data": data, "cursor": end, "eof": eof}
+
+    def _close_stdout_slave_fd(self) -> None:
+        if self._stdout_slave_fd is None:
+            return
+        try:
+            os.close(self._stdout_slave_fd)
+        except OSError:
+            pass
+        self._stdout_slave_fd = None
+
+    def _close_stdout_pty(self) -> None:
+        self._close_stdout_slave_fd()
+        if self._stdout_master_fd is None:
+            return
+        try:
+            os.close(self._stdout_master_fd)
+        except OSError:
+            pass
+        self._stdout_master_fd = None
 
     @staticmethod
     def _set_nonblocking(fd: int) -> None:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from interactive_analysis.errors import InvalidStateError
 from interactive_analysis.session import AnalysisSession
 
 
@@ -9,6 +12,7 @@ class FakeBackend:
         self.idx = 0
         self.step_calls = 0
         self.run_until_calls = 0
+        self.pause_calls = 0
 
     def start(self, target, args, cwd, qemu_config=None):  # noqa: ANN001
         del target, args, cwd, qemu_config
@@ -19,6 +23,7 @@ class FakeBackend:
 
     def pause(self, timeout):  # noqa: ANN001
         del timeout
+        self.pause_calls += 1
         return {"state": {"session_status": "paused"}, "result": {}}
 
     def run_until_event(self, event_types, timeout):  # noqa: ANN001
@@ -43,9 +48,6 @@ class FakeBackend:
 
     def write_stdin(self, data):  # noqa: ANN001
         del data
-        return {"state": {}, "result": {}}
-
-    def close_stdin(self):
         return {"state": {}, "result": {}}
 
     def read_stdout(self, cursor=0, max_chars=4096):  # noqa: ANN001
@@ -159,3 +161,25 @@ def test_session_bp_run_single_breakpoint_uses_run_until_address() -> None:
     assert result["result"]["matched_address"] == "0x1008"
     assert backend.run_until_calls == 1
     assert backend.step_calls == 0
+
+
+def test_session_pause_noop_when_idle_or_paused() -> None:
+    backend = FakeBackend()
+    session = AnalysisSession(backend=backend)
+    session.state.session_status = "idle"
+
+    first = session.pause(timeout=1.0)
+    assert first["result"]["noop"] is True
+    assert first["state"]["session_status"] == "paused"
+    assert backend.pause_calls == 0
+
+    second = session.pause(timeout=1.0)
+    assert second["result"]["noop"] is True
+    assert second["state"]["session_status"] == "paused"
+    assert backend.pause_calls == 0
+
+
+def test_session_pause_raises_when_not_started() -> None:
+    session = AnalysisSession(backend=FakeBackend())
+    with pytest.raises(InvalidStateError, match="session is not started"):
+        session.pause(timeout=1.0)

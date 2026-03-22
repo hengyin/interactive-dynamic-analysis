@@ -217,9 +217,6 @@ class FakeProcessRunner:
         self.stdin_writes.append(data)
         return len(data)
 
-    def close_stdin(self) -> None:
-        return None
-
     def read_stdout(self, cursor: int = 0, max_chars: int = 4096) -> dict:
         del max_chars
         return {"data": "", "cursor": cursor, "eof": False}

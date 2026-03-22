@@ -10,6 +10,8 @@ class FakeSession:
         self.last_qemu_config = None
         self.close_calls = 0
         self.stdin_written = ""
+        self.stdout_cursors: list[int] = []
+        self.stderr_cursors: list[int] = []
 
     def start(self, target, args=None, cwd=None, qemu_config=None):  # noqa: ANN001
         if self.started:
@@ -74,13 +76,12 @@ class FakeSession:
         self.stdin_written += data
         return {"ok": True, "command": "write_stdin", "result": {"written": len(data)}}
 
-    def close_stdin(self):
-        return {"ok": True, "command": "close_stdin", "result": {}}
-
     def read_stdout(self, cursor=0, max_chars=4096):  # noqa: ANN001
+        self.stdout_cursors.append(cursor)
         return {"ok": True, "command": "read_stdout", "result": {"data": "abc", "cursor": cursor + 3, "eof": False, "max_chars": max_chars}}
 
     def read_stderr(self, cursor=0, max_chars=4096):  # noqa: ANN001
+        self.stderr_cursors.append(cursor)
         return {"ok": True, "command": "read_stderr", "result": {"data": "", "cursor": cursor, "eof": False, "max_chars": max_chars}}
 
     def bp_add(self, address):  # noqa: ANN001
@@ -96,8 +97,12 @@ class FakeSession:
         return {"ok": True, "command": "bp_clear", "result": {"breakpoints": []}}
 
     def bp_run(self, timeout=5.0, max_steps=10000):  # noqa: ANN001
-        return {"ok": True, "command": "run_until_address", "result": {"matched_address": "0x401000", "timeout": timeout, "max_steps": max_steps}}
-
+        del max_steps
+        return {
+            "ok": True,
+            "command": "bp_run",
+            "result": {"matched_address": "0x401000", "selected_address": "0x401000", "steps": 0, "timeout": timeout},
+        }
 
 def _server() -> InteractiveAnalysisMcpServer:
     return InteractiveAnalysisMcpServer(session_factory=FakeSession)
@@ -121,10 +126,15 @@ def test_mcp_tools_list_contains_short_names() -> None:
     assert "run" in names
     assert "syms" in names
     assert "pause" in names
-    assert "stdin" in names
+    assert "send_bytes" in names
+    assert "send_line" in names
     assert "stdout" in names
     assert "bp_add" in names
-    assert "bp_run" in names
+    assert "bp_list" in names
+    assert "stdin" not in names
+    assert "stdin_file" not in names
+    assert "until" not in names
+    assert "bp_run" not in names
 
 
 def test_mcp_tool_call_start() -> None:
@@ -219,19 +229,74 @@ def test_mcp_tool_call_unknown_tool_returns_error() -> None:
     assert response["result"]["isError"] is True
 
 
-def test_mcp_tool_call_write_stdin() -> None:
+def test_mcp_tool_call_send_bytes() -> None:
     server = _server()
     response = server.handle_request(
         {
             "jsonrpc": "2.0",
-            "id": 5,
+            "id": 55,
             "method": "tools/call",
-            "params": {"name": "stdin", "arguments": {"data": "hello\n"}},
+            "params": {"name": "send_bytes", "arguments": {"data": "abc"}},
         }
     )
     assert response is not None
     assert response["result"]["isError"] is False
-    assert response["result"]["structuredContent"]["result"]["written"] == 6
+    assert response["result"]["structuredContent"]["result"]["written"] == 3
+
+
+def test_mcp_tool_call_send_line_appends_newline() -> None:
+    fake = FakeSession()
+    server = InteractiveAnalysisMcpServer(session_factory=lambda: fake)
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 56,
+            "method": "tools/call",
+            "params": {"name": "send_line", "arguments": {"line": "hello"}},
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is False
+    assert fake.stdin_written == "hello\n"
+
+
+def test_mcp_tool_call_send_line_without_line_sends_newline_only() -> None:
+    fake = FakeSession()
+    server = InteractiveAnalysisMcpServer(session_factory=lambda: fake)
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 57,
+            "method": "tools/call",
+            "params": {"name": "send_line", "arguments": {}},
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is False
+    assert fake.stdin_written == "\n"
+
+
+def test_mcp_stdout_uses_internal_cursor_progression() -> None:
+    fake = FakeSession()
+    server = InteractiveAnalysisMcpServer(session_factory=lambda: fake)
+    first = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 58,
+            "method": "tools/call",
+            "params": {"name": "stdout", "arguments": {"max_chars": 16}},
+        }
+    )
+    second = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 59,
+            "method": "tools/call",
+            "params": {"name": "stdout", "arguments": {"max_chars": 16}},
+        }
+    )
+    assert first is not None and second is not None
+    assert fake.stdout_cursors == [0, 3]
 
 
 def test_mcp_tool_call_resume() -> None:
@@ -249,27 +314,23 @@ def test_mcp_tool_call_resume() -> None:
     assert response["result"]["structuredContent"]["command"] == "resume"
 
 
-def test_mcp_tool_call_write_stdin_file(tmp_path) -> None:  # noqa: ANN001
-    fake = FakeSession()
-    server = InteractiveAnalysisMcpServer(session_factory=lambda: fake)
-    input_file = tmp_path / "pov.txt"
-    input_file.write_text("1\n[[[]]]\n", encoding="utf-8")
+def test_mcp_tool_call_run_uses_breakpoint_when_configured() -> None:
+    class BreakpointSession(FakeSession):
+        def bp_list(self):
+            return {"ok": True, "command": "bp_list", "result": {"breakpoints": ["0x401000"]}}
 
+    server = InteractiveAnalysisMcpServer(session_factory=BreakpointSession)
     response = server.handle_request(
         {
             "jsonrpc": "2.0",
-            "id": 71,
+            "id": 601,
             "method": "tools/call",
-            "params": {
-                "name": "stdin_file",
-                "arguments": {"path": str(input_file), "chunk_size": 2},
-            },
+            "params": {"name": "run", "arguments": {"timeout": 1.5}},
         }
     )
     assert response is not None
     assert response["result"]["isError"] is False
-    assert response["result"]["structuredContent"]["written"] == len("1\n[[[]]]\n")
-    assert fake.stdin_written == "1\n[[[]]]\n"
+    assert response["result"]["structuredContent"]["command"] == "bp_run"
 
 
 def test_mcp_tool_call_bp_add() -> None:

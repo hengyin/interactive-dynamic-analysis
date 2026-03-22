@@ -311,13 +311,6 @@ class QemuUserInstrumentedBackend:
         written = self._process_runner.write_stdin(data)
         return self._response({"written": written})
 
-    def close_stdin(self) -> dict[str, Any]:
-        self._require_started()
-        if self._process_runner is None:
-            raise UnsupportedOperationError("backend does not have a launched process")
-        self._process_runner.close_stdin()
-        return self._response({})
-
     def read_stdout(self, cursor: int = 0, max_chars: int = 4096) -> dict[str, Any]:
         self._require_started()
         if self._process_runner is None:

@@ -53,6 +53,11 @@ class AnalysisSession:
         return self._forward("resume", self.backend.resume(timeout))
 
     def pause(self, timeout: float = 5.0) -> dict[str, Any]:
+        if self.state.session_status in {"not_started", "closed"}:
+            raise InvalidStateError("session is not started")
+        if self.state.session_status in {"idle", "paused"}:
+            self.state.session_status = "paused"
+            return self._response("pause", {"status": "paused", "noop": True})
         return self._forward("pause", self.backend.pause(timeout))
 
     def run_until_event(self, event_types: list[str], timeout: float = 5.0) -> dict[str, Any]:
@@ -132,9 +137,6 @@ class AnalysisSession:
 
     def write_stdin(self, data: str) -> dict[str, Any]:
         return self._forward("write_stdin", self.backend.write_stdin(data))
-
-    def close_stdin(self) -> dict[str, Any]:
-        return self._forward("close_stdin", self.backend.close_stdin())
 
     def read_stdout(self, cursor: int = 0, max_chars: int = 4096) -> dict[str, Any]:
         return self._forward("read_stdout", self.backend.read_stdout(cursor, max_chars))

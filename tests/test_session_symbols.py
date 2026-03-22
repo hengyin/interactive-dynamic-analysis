@@ -38,9 +38,6 @@ class FakeBackend:
         del data
         return {"state": {}, "result": {"written": 0}}
 
-    def close_stdin(self):
-        return {"state": {}, "result": {}}
-
     def read_stdout(self, cursor=0, max_chars=4096):  # noqa: ANN001
         del cursor, max_chars
         return {"state": {}, "result": {"data": "", "cursor": 0, "eof": False}}
