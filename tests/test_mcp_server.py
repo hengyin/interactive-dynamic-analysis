@@ -112,7 +112,7 @@ def test_mcp_initialize() -> None:
     server = _server()
     response = server.handle_request({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
     assert response is not None
-    assert response["result"]["serverInfo"]["name"] == "ida"
+    assert response["result"]["serverInfo"]["name"] == "dynamiq"
     assert "tools" in response["result"]["capabilities"]
 
 

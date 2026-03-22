@@ -16,7 +16,7 @@ from .session import AnalysisSession
 JSON = dict[str, Any]
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
-SERVER_NAME = "ida"
+SERVER_NAME = "dynamiq"
 SERVER_VERSION = "0.1.0"
 
 
