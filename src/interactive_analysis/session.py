@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any
@@ -155,20 +156,7 @@ class AnalysisSession:
         if elf_type == "DYN":
             maps_result = self.list_memory_maps()["result"]
             regions = maps_result.get("maps", {}).get("regions", [])
-            target_name = target.rsplit("/", 1)[-1]
-            candidates: list[int] = []
-            for region in regions:
-                if not isinstance(region, dict):
-                    continue
-                name = str(region.get("name") or "")
-                start = region.get("start")
-                if not isinstance(start, str):
-                    continue
-                if target_name in name:
-                    try:
-                        candidates.append(int(start, 16))
-                    except ValueError:
-                        continue
+            candidates = self._resolve_pie_bases(target=target, regions=regions)
             if not candidates:
                 raise InvalidStateError("unable to resolve PIE load base from memory maps")
             load_base = min(candidates)
@@ -378,3 +366,85 @@ class AnalysisSession:
             if len(items) >= max_count:
                 break
         return items
+
+    @staticmethod
+    def _resolve_pie_bases(target: str, regions: Any) -> list[int]:
+        if not isinstance(regions, list):
+            return []
+        target_real = os.path.realpath(target)
+        target_name = os.path.basename(target_real)
+
+        def parse_addr(value: Any) -> int | None:
+            if isinstance(value, str):
+                try:
+                    return int(value, 16)
+                except ValueError:
+                    return None
+            return None
+
+        def parse_offset(value: Any) -> int | None:
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str):
+                try:
+                    return int(value, 16)
+                except ValueError:
+                    try:
+                        return int(value, 10)
+                    except ValueError:
+                        return None
+            return None
+
+        def normalize_path(value: Any) -> str:
+            if not isinstance(value, str):
+                return ""
+            text = value.strip()
+            if text == "" or text.startswith("["):
+                return ""
+            return text
+
+        exact_path_zero_offset: list[int] = []
+        exact_path_any_offset: list[int] = []
+        basename_zero_offset: list[int] = []
+        basename_any_offset: list[int] = []
+        legacy_contains: list[int] = []
+
+        for region in regions:
+            if not isinstance(region, dict):
+                continue
+            start = parse_addr(region.get("start"))
+            if start is None:
+                continue
+            path = normalize_path(region.get("path"))
+            if path == "":
+                path = normalize_path(region.get("name"))
+            if path == "":
+                continue
+            offset = parse_offset(region.get("offset"))
+
+            path_real = os.path.realpath(path)
+            is_exact_path = path_real == target_real
+            is_basename = os.path.basename(path_real) == target_name
+            is_legacy_contains = target_name in path
+            is_offset_zero = offset == 0 if offset is not None else False
+
+            if is_exact_path and is_offset_zero:
+                exact_path_zero_offset.append(start)
+            elif is_exact_path:
+                exact_path_any_offset.append(start)
+            elif is_basename and is_offset_zero:
+                basename_zero_offset.append(start)
+            elif is_basename:
+                basename_any_offset.append(start)
+            elif is_legacy_contains:
+                legacy_contains.append(start)
+
+        if exact_path_zero_offset:
+            return exact_path_zero_offset
+        if exact_path_any_offset:
+            return exact_path_any_offset
+        if basename_zero_offset:
+            return basename_zero_offset
+        if basename_any_offset:
+            return basename_any_offset
+        return legacy_contains

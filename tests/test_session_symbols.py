@@ -157,3 +157,56 @@ def test_symbols_pie_uses_map_base(monkeypatch) -> None:
     assert result["result"]["elf_type"] == "DYN"
     assert result["result"]["load_base"] == "0x555555554000"
     assert result["result"]["symbols"][0]["loaded_address"] == "0x555555555130"
+
+
+def test_symbols_pie_prefers_exact_path_with_zero_offset(monkeypatch) -> None:
+    def fake_run(cmd, check, capture_output, text):  # noqa: ANN001
+        del check, capture_output, text
+        if cmd[1] == "-h":
+            return ProcResult("Type:                              DYN (Position-Independent Executable file)\n")
+        return ProcResult(
+            "Symbol table '.symtab' contains 2 entries:\n"
+            "   Num:    Value          Size Type    Bind   Vis      Ndx Name\n"
+            "     1: 0000000000001130    42 FUNC    GLOBAL DEFAULT   14 main\n"
+        )
+
+    monkeypatch.setattr("interactive_analysis.session.subprocess.run", fake_run)
+    target = "/tmp/bin/a.out"
+    maps = [
+        {"start": "0x500000000000", "end": "0x500000001000", "perm": "r-x", "path": "/tmp/other/a.out", "offset": "0x0"},
+        {"start": "0x555555554000", "end": "0x555555556000", "perm": "r-x", "path": "/tmp/bin/a.out", "offset": "0x0"},
+        {"start": "0x555555557000", "end": "0x555555559000", "perm": "r--", "path": "/tmp/bin/a.out", "offset": "0x2000"},
+    ]
+    session = AnalysisSession(backend=FakeBackend(maps_result=maps))
+    session.state.target = target
+
+    result = session.symbols()
+
+    assert result["result"]["elf_type"] == "DYN"
+    assert result["result"]["load_base"] == "0x555555554000"
+    assert result["result"]["symbols"][0]["loaded_address"] == "0x555555555130"
+
+
+def test_symbols_pie_falls_back_to_basename_contains(monkeypatch) -> None:
+    def fake_run(cmd, check, capture_output, text):  # noqa: ANN001
+        del check, capture_output, text
+        if cmd[1] == "-h":
+            return ProcResult("Type:                              DYN (Position-Independent Executable file)\n")
+        return ProcResult(
+            "Symbol table '.symtab' contains 2 entries:\n"
+            "   Num:    Value          Size Type    Bind   Vis      Ndx Name\n"
+            "     1: 0000000000001130    42 FUNC    GLOBAL DEFAULT   14 main\n"
+        )
+
+    monkeypatch.setattr("interactive_analysis.session.subprocess.run", fake_run)
+    target = "/tmp/x/sample_target"
+    maps = [
+        {"start": "0x400000", "end": "0x402000", "perm": "r-x", "name": "sample_target"},
+    ]
+    session = AnalysisSession(backend=FakeBackend(maps_result=maps))
+    session.state.target = target
+
+    result = session.symbols()
+
+    assert result["result"]["load_base"] == "0x400000"
+    assert result["result"]["symbols"][0]["loaded_address"] == "0x401130"

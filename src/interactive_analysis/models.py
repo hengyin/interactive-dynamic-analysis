@@ -33,6 +33,9 @@ class MemoryRegion:
     end: str
     perm: str
     name: str | None = None
+    path: str | None = None
+    offset: str | None = None
+    inode: int | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "MemoryRegion":
@@ -42,20 +45,39 @@ class MemoryRegion:
         name = payload.get("name")
         if name is not None and not isinstance(name, str):
             raise EventValidationError("memory map region name must be a string or null")
+        path = payload.get("path")
+        if path is not None and not isinstance(path, str):
+            raise EventValidationError("memory map region path must be a string or null")
+        offset = payload.get("offset")
+        if offset is not None and not isinstance(offset, str):
+            raise EventValidationError("memory map region offset must be a string or null")
+        inode = payload.get("inode")
+        if inode is not None and not isinstance(inode, int):
+            raise EventValidationError("memory map region inode must be an integer or null")
         return cls(
             start=normalize_address(payload.get("start")),
             end=normalize_address(payload.get("end")),
             perm=perm,
             name=name,
+            path=path,
+            offset=offset,
+            inode=inode,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "start": self.start,
             "end": self.end,
             "perm": self.perm,
             "name": self.name,
         }
+        if self.path is not None:
+            payload["path"] = self.path
+        if self.offset is not None:
+            payload["offset"] = self.offset
+        if self.inode is not None:
+            payload["inode"] = self.inode
+        return payload
 
 
 @dataclass(slots=True)

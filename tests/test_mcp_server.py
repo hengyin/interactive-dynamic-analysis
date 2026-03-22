@@ -276,6 +276,29 @@ def test_mcp_tool_call_send_line_without_line_sends_newline_only() -> None:
     assert fake.stdin_written == "\n"
 
 
+def test_mcp_tool_call_send_file(tmp_path) -> None:  # noqa: ANN001
+    fake = FakeSession()
+    server = InteractiveAnalysisMcpServer(session_factory=lambda: fake)
+    payload = tmp_path / "payload.txt"
+    payload.write_text("A\nB", encoding="utf-8")
+
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 575,
+            "method": "tools/call",
+            "params": {
+                "name": "send_file",
+                "arguments": {"path": str(payload), "append_newline": True},
+            },
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is False
+    assert fake.stdin_written == "A\nB\n"
+    assert response["result"]["structuredContent"]["written"] == 4
+
+
 def test_mcp_stdout_uses_internal_cursor_progression() -> None:
     fake = FakeSession()
     server = InteractiveAnalysisMcpServer(session_factory=lambda: fake)

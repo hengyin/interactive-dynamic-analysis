@@ -306,8 +306,9 @@ class QemuUserInstrumentedBackend:
         self._require_started()
         if self._process_runner is None:
             raise UnsupportedOperationError("backend does not have a launched process")
-        if self._state.get("session_status") != "running":
-            raise InvalidStateError("session is paused; call resume before write_stdin")
+        status = self._state.get("session_status")
+        if status not in {"running", "paused"}:
+            raise InvalidStateError("session is not active; start and run/pause session before write_stdin")
         written = self._process_runner.write_stdin(data)
         return self._response({"written": written})
 

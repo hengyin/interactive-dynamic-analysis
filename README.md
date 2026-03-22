@@ -91,6 +91,8 @@ This path expects your locally built QEMU binary at `/home/heng/git/qemu/build-i
 
 This repository provides a minimal MCP server for external coding platforms (for example Claude Code/OpenCode style integrations).
 
+For LLM operating guidance, see [docs/LLM_PLAYBOOK.md](docs/LLM_PLAYBOOK.md).
+
 Start it with:
 
 ```bash
@@ -107,7 +109,7 @@ Current tools exposed:
 
 - `start`, `close`, `caps`, `state`
 - `run`, `pause`
-- `send_bytes`, `send_line`, `stdout`, `stderr`
+- `send_bytes`, `send_line`, `send_file`, `stdout`, `stderr`
 - `regs`, `disasm`, `mem`, `maps`, `syms`
 - `step`, `bb`
 - `bp_add`, `bp_del`, `bp_list`, `bp_clear`
@@ -118,7 +120,7 @@ Use this order for interactive programs:
 
 1. `start`
 2. `run`
-3. one or more `send_bytes` / `send_line`
+3. one or more `send_bytes` / `send_line` / `send_file`
 4. poll `stdout` and `stderr`
 
 Example `tools/call` arguments:
@@ -152,6 +154,14 @@ Example `tools/call` arguments:
 }
 ```
 
+- `send_file` (required `path`)
+```json
+{
+  "path": "/tmp/pov_input.txt",
+  "append_newline": true
+}
+```
+
 - `stdout` / `stderr`
 ```json
 {
@@ -168,4 +178,4 @@ Example `tools/call` arguments:
 - Session is `idle` and target is not running:
   Use `start` (MCP now defaults to launch mode), then `run`.
 - Large multiline payloads fail in tool UI:
-  Send escaped newlines or split into multiple `send_bytes` calls.
+  Use `send_file` (preferred) or split into multiple `send_bytes` calls.

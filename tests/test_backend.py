@@ -596,7 +596,7 @@ def test_backend_get_state_reports_process_exit_code() -> None:
     assert state["stop_reason"] == "exited"
 
 
-def test_backend_write_stdin_requires_running_session_state() -> None:
+def test_backend_write_stdin_allows_paused_session_state() -> None:
     runner = FakeProcessRunner()
     backend = QemuUserInstrumentedBackend(
         qmp_client=None,
@@ -605,8 +605,24 @@ def test_backend_write_stdin_requires_running_session_state() -> None:
         process_runner=runner,
     )
     backend.start("target.bin", [], None, {"launch": True, "qemu_user_path": "/usr/bin/qemu-x86_64"})
+    backend._state["session_status"] = "paused"
+    result = backend.write_stdin("1\n")
+    assert result["result"]["written"] == 2
+    assert runner.stdin_writes == ["1\n"]
 
-    with pytest.raises(InvalidStateError, match="call resume before write_stdin"):
+
+def test_backend_write_stdin_rejects_idle_session_state() -> None:
+    runner = FakeProcessRunner()
+    backend = QemuUserInstrumentedBackend(
+        qmp_client=None,
+        instrumentation_client=FakeInstrumentationClient(),
+        instrumentation_rpc_client=FakeInstrumentationRpcClient(),
+        process_runner=runner,
+    )
+    backend.start("target.bin", [], None, {"launch": True, "qemu_user_path": "/usr/bin/qemu-x86_64"})
+    backend._state["session_status"] = "idle"
+
+    with pytest.raises(InvalidStateError, match="session is not active"):
         backend.write_stdin("1\n")
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -219,6 +220,30 @@ class InteractiveAnalysisMcpServer:
                         '(example: {"line":"1"})'
                     )
                 return self._tool_ok(self._ensure_session().write_stdin(data=f"{line}\n"))
+            if name == "send_file":
+                path_value = arguments.get("path")
+                if not isinstance(path_value, str) or path_value.strip() == "":
+                    return self._tool_error(
+                        "send_file requires non-empty string argument `path` "
+                        '(example: {"path":"/tmp/pov_input.txt"})'
+                    )
+                append_newline = bool(arguments.get("append_newline", False))
+                path = Path(path_value)
+                if not path.exists() or not path.is_file():
+                    return self._tool_error(f"send_file path is not a readable file: {path_value}")
+                total_written = 0
+                session = self._ensure_session()
+                with path.open("r", encoding="utf-8", errors="replace") as fp:
+                    while True:
+                        chunk = fp.read(4096)
+                        if not chunk:
+                            break
+                        write_result = session.write_stdin(data=chunk)
+                        total_written += int(write_result["result"].get("written", 0))
+                if append_newline:
+                    write_result = session.write_stdin(data="\n")
+                    total_written += int(write_result["result"].get("written", 0))
+                return self._tool_ok({"written": total_written, "path": str(path), "append_newline": append_newline})
             if name == "stdout":
                 result = self._ensure_session().read_stdout(
                     cursor=self._stdout_cursor,
@@ -292,7 +317,8 @@ class InteractiveAnalysisMcpServer:
                 name="start",
                 description=(
                     "Start an analysis session for a target binary. "
-                    "After start, session is typically paused; call run before send_bytes/send_line."
+                    "After start, session is typically paused. "
+                    "Recommended next steps: syms -> bp_add (using loaded_address) -> run."
                 ),
                 input_schema={
                     "type": "object",
@@ -360,12 +386,18 @@ class InteractiveAnalysisMcpServer:
             ),
             ToolSpec(
                 name="state",
-                description="Return full session state.",
+                description=(
+                    "Return full session state. "
+                    "Use this to confirm session_status transitions (idle/paused/running/exited)."
+                ),
                 input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             ),
             ToolSpec(
                 name="syms",
-                description="List ELF symbols and resolve loaded addresses using current memory maps.",
+                description=(
+                    "List ELF symbols and resolve runtime loaded addresses for THIS session. "
+                    "Always use returned loaded_address for breakpoints; do not hardcode addresses across sessions."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -379,7 +411,8 @@ class InteractiveAnalysisMcpServer:
                 name="run",
                 description=(
                     "Run target execution. If breakpoints are configured, run until next breakpoint; "
-                    "otherwise plain resume."
+                    "otherwise plain resume. "
+                    "For interactive targets: run -> read stdout/stderr -> send input -> run."
                 ),
                 input_schema={
                     "type": "object",
@@ -511,7 +544,10 @@ class InteractiveAnalysisMcpServer:
             ),
             ToolSpec(
                 name="bp_add",
-                description="Add a persistent breakpoint address.",
+                description=(
+                    "Add a persistent breakpoint address. "
+                    "Use syms.loaded_address from current session; avoid guessed static/base+offset addresses."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {"address": {"type": "string", "minLength": 1}},
@@ -543,7 +579,7 @@ class InteractiveAnalysisMcpServer:
                 name="send_bytes",
                 description=(
                     "Pwntools-style raw send. Write UTF-8 bytes/text to target stdin immediately. "
-                    "Session must be running."
+                    "Session must be running. Use for long payloads; include '\\n' explicitly when needed."
                 ),
                 input_schema={
                     "type": "object",
@@ -562,7 +598,8 @@ class InteractiveAnalysisMcpServer:
                 name="send_line",
                 description=(
                     "Pwntools-style line send. Appends a single '\\n' and writes to stdin. "
-                    "If `line` is omitted, sends only newline."
+                    "If `line` is omitted, sends only newline. "
+                    "For menu flows, prefer send_line over send_bytes."
                 ),
                 input_schema={
                     "type": "object",
@@ -577,8 +614,35 @@ class InteractiveAnalysisMcpServer:
                 },
             ),
             ToolSpec(
+                name="send_file",
+                description=(
+                    "Stream a local UTF-8 text file into target stdin using fixed internal chunks. "
+                    "Use this for large payloads that are too long for a single send_bytes call."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute or relative path to local input file.",
+                            "minLength": 1,
+                        },
+                        "append_newline": {
+                            "type": "boolean",
+                            "description": "Append a final newline after file contents.",
+                            "default": False,
+                        },
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            ),
+            ToolSpec(
                 name="stdout",
-                description="Read next buffered stdout chunk (server maintains cursor internally).",
+                description=(
+                    "Read next buffered stdout chunk (server maintains cursor internally). "
+                    "Call repeatedly after run/send_* to observe new output."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -594,7 +658,10 @@ class InteractiveAnalysisMcpServer:
             ),
             ToolSpec(
                 name="stderr",
-                description="Read next buffered stderr chunk (server maintains cursor internally).",
+                description=(
+                    "Read next buffered stderr chunk (server maintains cursor internally). "
+                    "Call repeatedly after run/send_* to observe new output."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
