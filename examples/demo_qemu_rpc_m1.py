@@ -82,7 +82,6 @@ def main() -> int:
                 "launch_connect_timeout": 10.0,
                 "capabilities_override": {
                     "disassemble": True,
-                    "list_memory_maps": False,
                     "run_until_address": True,
                 },
             },
@@ -117,6 +116,9 @@ def main() -> int:
             run_result = session.run_until_address(target_address)
             print(run_result)
             require_pc_match(run_result, target_address)
+
+            print("== memory maps ==")
+            print(session.list_memory_maps())
 
             print("== memory ==")
             rip = session.get_registers(["rip"])["result"]["registers"]["rip"]
