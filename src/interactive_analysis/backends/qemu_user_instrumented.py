@@ -216,8 +216,14 @@ class QemuUserInstrumentedBackend:
             status = result.get("status")
             if isinstance(status, str):
                 self._state["session_status"] = status
+            matched_pc = result.get("matched_pc")
+            matched_address = result.get("matched_address")
             pc = result.get("pc")
-            if isinstance(pc, str):
+            if isinstance(matched_pc, str):
+                self._state["pc"] = matched_pc
+            elif isinstance(matched_address, str):
+                self._state["pc"] = matched_address
+            elif isinstance(pc, str):
                 self._state["pc"] = pc
             return self._response({"matched_address": address, **result})
         if self._instrumentation is None:
