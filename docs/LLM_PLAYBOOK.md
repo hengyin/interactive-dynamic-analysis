@@ -38,6 +38,9 @@ This playbook defines the required operating pattern for LLM-driven analysis ses
 - `run` is breakpoint-aware:
   - if breakpoints exist: run until next breakpoint
   - otherwise: plain resume
+- `run` timeout is non-fatal:
+  - treat as `timed_out` (waiting for input/condition), not session failure
+  - always follow with `stdout` + `stderr` + `state` before deciding recovery
 - `pause` is independent and can be called anytime during an active session.
 
 ## Memory/Register Safety Rules

@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from .backends.qemu_user_instrumented import QemuUserInstrumentedBackend
-from .errors import InvalidStateError
+from .errors import InvalidStateError, SessionTimeoutError
 from .session import AnalysisSession
 
 
@@ -109,11 +110,24 @@ class InteractiveAnalysisMcpServer:
         try:
             if name == "start":
                 session = self._ensure_session()
-                qemu_config = dict(arguments.get("qemu_config") or {})
+                qemu_config = self._parse_object(arguments, "qemu_config", default={})
                 qemu_config.setdefault("launch", True)
-                target = str(arguments["target"])
-                args = [str(item) for item in arguments.get("args", [])]
-                cwd = str(arguments["cwd"]) if "cwd" in arguments and arguments["cwd"] is not None else None
+                target_value = arguments.get("target")
+                if not isinstance(target_value, str) or target_value.strip() == "":
+                    return self._tool_error(
+                        "start requires non-empty string argument `target` "
+                        '(example: {"target":"/home/heng/work2/KPRCA_00021"})'
+                    )
+                target = target_value.strip()
+                # Reject malformed placeholder-like targets early to avoid
+                # entering launch/connect timeout paths.
+                if not self._looks_like_path_token(target):
+                    return self._tool_error(
+                        "start target appears malformed. "
+                        "Provide a real target path."
+                    )
+                args = self._parse_string_list(arguments, "args", default=[])
+                cwd = self._parse_optional_string(arguments, "cwd", default=None)
                 try:
                     result = session.start(
                         target=target,
@@ -145,71 +159,107 @@ class InteractiveAnalysisMcpServer:
             if name == "state":
                 return self._tool_ok(self._ensure_session().get_state())
             if name == "syms":
+                max_count = self._parse_int(arguments, "max_count", default=500, minimum=1)
+                name_filter = self._parse_optional_string(arguments, "name_filter", default=None)
                 return self._tool_ok(
                     self._ensure_session().symbols(
-                        max_count=int(arguments.get("max_count", 500)),
-                        name_filter=str(arguments["name_filter"]) if "name_filter" in arguments and arguments["name_filter"] is not None else None,
+                        max_count=max_count,
+                        name_filter=name_filter,
                     )
                 )
             if name == "run":
                 session = self._ensure_session()
-                timeout = float(arguments.get("timeout", 5.0))
+                timeout = self._parse_positive_float(arguments, "timeout", default=5.0)
                 bp_list_result = session.bp_list()
                 breakpoints = bp_list_result.get("result", {}).get("breakpoints", [])
-                if isinstance(breakpoints, list) and len(breakpoints) > 0:
-                    return self._tool_ok(session.bp_run(timeout=timeout))
-                return self._tool_ok(session.resume(timeout=timeout))
+                try:
+                    if isinstance(breakpoints, list) and len(breakpoints) > 0:
+                        return self._tool_ok(session.bp_run(timeout=timeout))
+                    return self._tool_ok(session.resume(timeout=timeout))
+                except SessionTimeoutError as exc:
+                    return self._tool_timeout(command="run", timeout=timeout, message=str(exc))
             if name == "pause":
-                return self._tool_ok(self._ensure_session().pause(timeout=float(arguments.get("timeout", 5.0))))
+                timeout = self._parse_positive_float(arguments, "timeout", default=5.0)
+                try:
+                    return self._tool_ok(self._ensure_session().pause(timeout=timeout))
+                except SessionTimeoutError as exc:
+                    return self._tool_timeout(command="pause", timeout=timeout, message=str(exc))
             if name == "regs":
-                names = arguments.get("names")
-                if names is not None and not isinstance(names, list):
-                    return self._tool_error("get_registers.names must be an array of strings")
+                names = self._parse_optional_string_list(arguments, "names", default=None)
                 return self._tool_ok(self._ensure_session().get_registers(names))
             if name == "disasm":
+                address = self._parse_nonempty_string(arguments, "address")
+                count = self._parse_int(arguments, "count", default=16, minimum=1)
                 return self._tool_ok(
                     self._ensure_session().disassemble(
-                        address=str(arguments["address"]),
-                        count=int(arguments.get("count", 16)),
+                        address=address,
+                        count=count,
                     )
                 )
             if name == "mem":
+                address = self._parse_nonempty_string(arguments, "address")
+                size = self._parse_int(arguments, "size", required=True, minimum=0)
                 return self._tool_ok(
                     self._ensure_session().read_memory(
-                        address=str(arguments["address"]),
-                        size=int(arguments["size"]),
+                        address=address,
+                        size=size,
                     )
                 )
             if name == "maps":
                 return self._tool_ok(self._ensure_session().list_memory_maps())
             if name == "step":
+                count = self._parse_int(arguments, "count", default=1, minimum=1)
+                timeout = self._parse_positive_float(arguments, "timeout", default=5.0)
                 return self._tool_ok(
                     self._ensure_session().step(
-                        count=int(arguments.get("count", 1)),
-                        timeout=float(arguments.get("timeout", 5.0)),
+                        count=count,
+                        timeout=timeout,
                     )
                 )
             if name == "bb":
+                count = self._parse_int(arguments, "count", default=1, minimum=1)
+                timeout = self._parse_positive_float(arguments, "timeout", default=5.0)
                 return self._tool_ok(
                     self._ensure_session().advance_basic_blocks(
-                        count=int(arguments.get("count", 1)),
-                        timeout=float(arguments.get("timeout", 5.0)),
+                        count=count,
+                        timeout=timeout,
                     )
                 )
             if name == "bp_add":
-                return self._tool_ok(self._ensure_session().bp_add(address=str(arguments["address"])))
+                address = self._parse_nonempty_string(arguments, "address")
+                return self._tool_ok(self._ensure_session().bp_add(address=address))
             if name == "bp_del":
-                return self._tool_ok(self._ensure_session().bp_del(address=str(arguments["address"])))
+                address = self._parse_nonempty_string(arguments, "address")
+                return self._tool_ok(self._ensure_session().bp_del(address=address))
             if name == "bp_list":
                 return self._tool_ok(self._ensure_session().bp_list())
             if name == "bp_clear":
                 return self._tool_ok(self._ensure_session().bp_clear())
             if name == "send_bytes":
                 data = arguments.get("data")
+                data_hex = arguments.get("data_hex")
+                if data is not None and data_hex is not None:
+                    return self._tool_error("send_bytes accepts either `data` or `data_hex`, not both")
+                if data_hex is not None:
+                    if not isinstance(data_hex, str) or data_hex.strip() == "":
+                        return self._tool_error(
+                            "send_bytes `data_hex` must be a non-empty hex string "
+                            '(example: {"data_hex":"040000000680ffffffffffff"})'
+                        )
+                    compact = "".join(data_hex.split())
+                    if compact.startswith(("0x", "0X")):
+                        compact = compact[2:]
+                    try:
+                        payload = bytes.fromhex(compact)
+                    except ValueError:
+                        return self._tool_error("send_bytes `data_hex` must contain only hex byte pairs")
+                    if len(payload) == 0:
+                        return self._tool_error("send_bytes decoded payload is empty")
+                    return self._tool_ok(self._ensure_session().write_stdin(data=payload))
                 if not isinstance(data, str) or data == "":
                     return self._tool_error(
-                        "send_bytes requires non-empty string argument `data` "
-                        '(example: {"data":"1\\n"})'
+                        "send_bytes requires non-empty string argument `data` or `data_hex` "
+                        '(example: {"data":"1\\n"} or {"data_hex":"4142430a"})'
                     )
                 return self._tool_ok(self._ensure_session().write_stdin(data=data))
             if name == "send_line":
@@ -227,13 +277,13 @@ class InteractiveAnalysisMcpServer:
                         "send_file requires non-empty string argument `path` "
                         '(example: {"path":"/tmp/pov_input.txt"})'
                     )
-                append_newline = bool(arguments.get("append_newline", False))
+                append_newline = self._parse_bool(arguments, "append_newline", default=False)
                 path = Path(path_value)
                 if not path.exists() or not path.is_file():
                     return self._tool_error(f"send_file path is not a readable file: {path_value}")
                 total_written = 0
                 session = self._ensure_session()
-                with path.open("r", encoding="utf-8", errors="replace") as fp:
+                with path.open("rb") as fp:
                     while True:
                         chunk = fp.read(4096)
                         if not chunk:
@@ -241,26 +291,34 @@ class InteractiveAnalysisMcpServer:
                         write_result = session.write_stdin(data=chunk)
                         total_written += int(write_result["result"].get("written", 0))
                 if append_newline:
-                    write_result = session.write_stdin(data="\n")
+                    write_result = session.write_stdin(data=b"\n")
                     total_written += int(write_result["result"].get("written", 0))
                 return self._tool_ok({"written": total_written, "path": str(path), "append_newline": append_newline})
             if name == "stdout":
-                result = self._ensure_session().read_stdout(
+                max_chars = self._parse_int(arguments, "max_chars", default=4096, minimum=1)
+                wait_ms = self._parse_int(arguments, "wait_ms", default=150, minimum=0)
+                result = self._read_stream_with_wait(
+                    read_fn=self._ensure_session().read_stdout,
                     cursor=self._stdout_cursor,
-                    max_chars=int(arguments.get("max_chars", 4096)),
+                    max_chars=max_chars,
+                    wait_ms=wait_ms,
                 )
-                payload = result.get("result")
+                payload = result.get("result") if isinstance(result, dict) else None
                 if isinstance(payload, dict):
                     cursor = payload.get("cursor")
                     if isinstance(cursor, int) and cursor >= 0:
                         self._stdout_cursor = cursor
                 return self._tool_ok(result)
             if name == "stderr":
-                result = self._ensure_session().read_stderr(
+                max_chars = self._parse_int(arguments, "max_chars", default=4096, minimum=1)
+                wait_ms = self._parse_int(arguments, "wait_ms", default=150, minimum=0)
+                result = self._read_stream_with_wait(
+                    read_fn=self._ensure_session().read_stderr,
                     cursor=self._stderr_cursor,
-                    max_chars=int(arguments.get("max_chars", 4096)),
+                    max_chars=max_chars,
+                    wait_ms=wait_ms,
                 )
-                payload = result.get("result")
+                payload = result.get("result") if isinstance(result, dict) else None
                 if isinstance(payload, dict):
                     cursor = payload.get("cursor")
                     if isinstance(cursor, int) and cursor >= 0:
@@ -287,8 +345,152 @@ class InteractiveAnalysisMcpServer:
         self._stderr_cursor = 0
 
     @staticmethod
+    def _parse_object(arguments: JSON, key: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
+        if key not in arguments:
+            return dict(default or {})
+        value = arguments.get(key)
+        if not isinstance(value, dict):
+            raise ValueError(f"{key} must be an object")
+        return dict(value)
+
+    @staticmethod
+    def _parse_optional_string(arguments: JSON, key: str, default: str | None = None) -> str | None:
+        if key not in arguments:
+            return default
+        value = arguments.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"{key} must be a string or null")
+        return value
+
+    @staticmethod
+    def _parse_nonempty_string(arguments: JSON, key: str) -> str:
+        value = arguments.get(key)
+        if not isinstance(value, str) or value.strip() == "":
+            raise ValueError(f"{key} must be a non-empty string")
+        return value
+
+    @staticmethod
+    def _parse_string_list(arguments: JSON, key: str, default: list[str] | None = None) -> list[str]:
+        if key not in arguments:
+            return list(default or [])
+        value = arguments.get(key)
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise ValueError(f"{key} must be an array of strings")
+        return list(value)
+
+    @staticmethod
+    def _parse_optional_string_list(arguments: JSON, key: str, default: list[str] | None = None) -> list[str] | None:
+        if key not in arguments:
+            return default
+        value = arguments.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise ValueError(f"{key} must be an array of strings")
+        return list(value)
+
+    @staticmethod
+    def _parse_int(
+        arguments: JSON,
+        key: str,
+        default: int | None = None,
+        required: bool = False,
+        minimum: int | None = None,
+    ) -> int:
+        if key not in arguments:
+            if required:
+                raise KeyError(key)
+            if default is None:
+                raise ValueError(f"{key} is required")
+            value = default
+        else:
+            value = arguments.get(key)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"{key} must be an integer")
+        if minimum is not None and value < minimum:
+            raise ValueError(f"{key} must be >= {minimum}")
+        return value
+
+    @staticmethod
+    def _parse_positive_float(arguments: JSON, key: str, default: float) -> float:
+        value = arguments.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be a number")
+        parsed = float(value)
+        if parsed <= 0:
+            raise ValueError(f"{key} must be > 0")
+        return parsed
+
+    @staticmethod
+    def _parse_bool(arguments: JSON, key: str, default: bool) -> bool:
+        if key not in arguments:
+            return default
+        value = arguments.get(key)
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be a boolean")
+        return value
+
+    @staticmethod
+    def _looks_like_path_token(value: str) -> bool:
+        # Accept common path-ish inputs (absolute/relative/POSIX/Windows-ish)
+        # and reject punctuation-only placeholders (",", "[]", "{}", etc.).
+        allowed_extra = {"/", "\\", ".", "_", "-", ":"}
+        return any(ch.isalnum() or ch in allowed_extra for ch in value)
+
+    @staticmethod
+    def _read_stream_with_wait(
+        read_fn: Callable[..., JSON],
+        cursor: int,
+        max_chars: int,
+        wait_ms: int,
+    ) -> JSON:
+        if wait_ms < 0:
+            raise ValueError("wait_ms must be >= 0")
+        result = read_fn(cursor=cursor, max_chars=max_chars)
+        payload = result.get("result")
+        if not isinstance(payload, dict):
+            return result
+        data = payload.get("data")
+        eof = bool(payload.get("eof"))
+        current_cursor = payload.get("cursor")
+        if isinstance(data, str) and data != "":
+            return result
+        if eof:
+            return result
+        if not isinstance(current_cursor, int) or current_cursor < 0:
+            return result
+        deadline = time.monotonic() + (wait_ms / 1000.0)
+        poll_interval = 0.02
+        while time.monotonic() < deadline:
+            time.sleep(poll_interval)
+            result = read_fn(cursor=current_cursor, max_chars=max_chars)
+            payload = result.get("result")
+            if not isinstance(payload, dict):
+                return result
+            data = payload.get("data")
+            eof = bool(payload.get("eof"))
+            next_cursor = payload.get("cursor")
+            if isinstance(data, str) and data != "":
+                return result
+            if eof:
+                return result
+            if isinstance(next_cursor, int) and next_cursor >= 0:
+                current_cursor = next_cursor
+        return result
+
+    @staticmethod
     def _tool_ok(payload: JSON) -> JSON:
-        text = json.dumps(payload, sort_keys=True)
+        # Always include machine-readable JSON for text-only clients.
+        text = json.dumps(
+            {
+                "ok": bool(payload.get("ok", True)),
+                "command": payload.get("command", "tool"),
+                "result": payload.get("result", {}),
+            },
+            sort_keys=True,
+        )
         return {
             "content": [{"type": "text", "text": text}],
             "structuredContent": payload,
@@ -300,6 +502,19 @@ class InteractiveAnalysisMcpServer:
         return {
             "content": [{"type": "text", "text": message}],
             "isError": True,
+        }
+
+    @staticmethod
+    def _tool_timeout(command: str, timeout: float, message: str) -> JSON:
+        payload = {
+            "ok": False,
+            "command": command,
+            "result": {"timed_out": True, "timeout": timeout, "message": message},
+        }
+        return {
+            "content": [{"type": "text", "text": json.dumps(payload, sort_keys=True)}],
+            "structuredContent": payload,
+            "isError": False,
         }
 
     @staticmethod
@@ -412,7 +627,8 @@ class InteractiveAnalysisMcpServer:
                 description=(
                     "Run target execution. If breakpoints are configured, run until next breakpoint; "
                     "otherwise plain resume. "
-                    "For interactive targets: run -> read stdout/stderr -> send input -> run."
+                    "For interactive targets: run -> read stdout/stderr -> send input -> run. "
+                    "A timeout is returned as non-fatal timed_out=true (not an MCP error)."
                 ),
                 input_schema={
                     "type": "object",
@@ -578,20 +794,25 @@ class InteractiveAnalysisMcpServer:
             ToolSpec(
                 name="send_bytes",
                 description=(
-                    "Pwntools-style raw send. Write UTF-8 bytes/text to target stdin immediately. "
+                    "Pwntools-style raw send. Write data to target stdin immediately. "
                     "Session must be active (idle/running/paused). "
-                    "Use for long payloads; include '\\n' explicitly when needed."
+                    "Use `data` for text or `data_hex` for exact raw bytes."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
                         "data": {
                             "type": "string",
-                            "description": "Raw data to write exactly as provided.",
+                            "description": "Text data to write (UTF-8 encoding).",
                             "minLength": 1,
-                        }
+                        },
+                        "data_hex": {
+                            "type": "string",
+                            "description": "Exact raw bytes encoded as hex (supports optional leading 0x).",
+                            "minLength": 1,
+                        },
                     },
-                    "required": ["data"],
+                    "anyOf": [{"required": ["data"]}, {"required": ["data_hex"]}],
                     "additionalProperties": False,
                 },
             ),
@@ -618,7 +839,7 @@ class InteractiveAnalysisMcpServer:
             ToolSpec(
                 name="send_file",
                 description=(
-                    "Stream a local UTF-8 text file into target stdin using fixed internal chunks. "
+                    "Stream a local file's raw bytes into target stdin using fixed internal chunks. "
                     "Session must be active (idle/running/paused). "
                     "Use this for large payloads that are too long for a single send_bytes call."
                 ),
@@ -644,7 +865,7 @@ class InteractiveAnalysisMcpServer:
                 name="stdout",
                 description=(
                     "Read next buffered stdout chunk (server maintains cursor internally). "
-                    "Call repeatedly after run/send_* to observe new output."
+                    "Calls briefly wait for fresh output to reduce run/read races."
                 ),
                 input_schema={
                     "type": "object",
@@ -655,6 +876,12 @@ class InteractiveAnalysisMcpServer:
                             "description": "Maximum characters to return in this chunk.",
                             "default": 4096,
                         },
+                        "wait_ms": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Optional wait budget (ms) for new output before returning empty.",
+                            "default": 150,
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -663,7 +890,7 @@ class InteractiveAnalysisMcpServer:
                 name="stderr",
                 description=(
                     "Read next buffered stderr chunk (server maintains cursor internally). "
-                    "Call repeatedly after run/send_* to observe new output."
+                    "Calls briefly wait for fresh output to reduce run/read races."
                 ),
                 input_schema={
                     "type": "object",
@@ -673,6 +900,12 @@ class InteractiveAnalysisMcpServer:
                             "minimum": 1,
                             "description": "Maximum characters to return in this chunk.",
                             "default": 4096,
+                        },
+                        "wait_ms": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Optional wait budget (ms) for new output before returning empty.",
+                            "default": 150,
                         },
                     },
                     "additionalProperties": False,

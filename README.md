@@ -1,26 +1,45 @@
 # Interactive Dynamic Analysis
 
-Instrumented `qemu-user` runtime for interactive userspace binary analysis.
+Python runtime for interactive userspace binary analysis, using instrumented `qemu-user` as the first backend.
 
-This repository currently contains:
+This project is analysis-first: it focuses on controllable execution plus structured state/event inspection for human and LLM workflows.
 
-- normalized runtime models
-- backend interfaces
-- a session scaffold
-- design notes in `design.md`
+## Repository Contents
+
+- runtime implementation in `src/interactive_analysis/`
+- tests in `tests/`
+- runnable examples in `examples/`
+- architecture and scope notes in `design.md`
+- live backend contract in `docs/live_backend_contract.md`
 - project planning in `docs/project_plan.md`
-- a live backend contract in `docs/live_backend_contract.md`
-- example target/instrumentation skeletons in `examples/`
+- LLM operation guidance in `docs/LLM_PLAYBOOK.md`
+
+## Quick Setup
+
+Requirements:
+
+- Python 3.11+
+- (for demos) `gcc` and `qemu-x86_64`
+
+Create a local environment and install dev dependencies:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+.venv/bin/python -m pip install -e '.[dev]'
+```
 
 ## Tests
 
-Run the default test suite with:
+Run the default test suite:
 
 ```bash
 PYTHONPATH=src .venv/bin/pytest -q
 ```
 
-Live integration tests are opt-in and require a running backend plus instrumentation endpoints.
+### Live QEMU Integration Tests (opt-in)
+
+Live tests are marked `live_qemu` and require a real backend/instrumentation environment.
 
 Set:
 
@@ -44,68 +63,61 @@ Then run:
 PYTHONPATH=src .venv/bin/pytest -q -m live_qemu
 ```
 
-`IA_LIVE_LAUNCH=1` tells the backend to launch `qemu-user` itself using the runtime launch contract. If unset, the live test assumes the backend endpoints already exist.
+`IA_LIVE_LAUNCH=1` tells the backend to launch `qemu-user` using the runtime launch contract. If unset, tests assume endpoints already exist.
 
-## Live Backend Contract
+## Demos
 
-See [docs/live_backend_contract.md](docs/live_backend_contract.md) for the minimum event/RPC contract expected by the runtime.
-
-Example artifacts:
-
-- [examples/sample_target.c](examples/sample_target.c)
-- [examples/instrumentation_sidecar.py](examples/instrumentation_sidecar.py)
-- [examples/demo_live_session.py](examples/demo_live_session.py)
-- [examples/demo_qemu_rpc_m1.py](examples/demo_qemu_rpc_m1.py)
-
-## Demo
-
-If `qemu-x86_64` and `gcc` are installed, you can run the end-to-end example with:
+### End-to-end local demo
 
 ```bash
-PYTHONPATH=src python examples/demo_live_session.py
+PYTHONPATH=src .venv/bin/python examples/demo_live_session.py
 ```
 
-This will:
+This demo will:
 
 1. compile `examples/sample_target.c`
 2. start `examples/instrumentation_sidecar.py`
-3. launch the target through the runtime using `qemu-user`
-4. execute a short analysis session
+3. launch the target through the runtime with `qemu-user`
+4. run a short analysis session
 
-For the current real-QEMU M1 slice, where only the RPC channel is implemented in QEMU, use:
+### Real QEMU RPC slice (M1)
 
 ```bash
-PYTHONPATH=src python examples/demo_qemu_rpc_m1.py
+PYTHONPATH=src .venv/bin/python examples/demo_qemu_rpc_m1.py
 ```
 
-This path expects your locally built QEMU binary at `/home/heng/git/qemu/build-ia/qemu-x86_64` and exercises:
+This path expects a locally built QEMU binary at `/home/heng/git/qemu/build-ia/qemu-x86_64` and exercises:
 
 1. `query_status`
 2. `get_registers`
 3. `advance_basic_blocks(1)`
-4. `disassemble(...)` from the live runtime `rip`
-5. `run_until_address(...)` against a future instruction address from that disassembly
+4. `disassemble(...)` from live runtime `rip`
+5. `run_until_address(...)` using a future instruction address
 6. `read_memory`
 
 ## MCP Server (stdio)
 
-This repository provides a minimal MCP server for external coding platforms (for example Claude Code/OpenCode style integrations).
-
-For LLM operating guidance, see [docs/LLM_PLAYBOOK.md](docs/LLM_PLAYBOOK.md).
+The repo includes a minimal MCP server for external coding platforms.
 
 Start it with:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m dynamiq.mcp_server
+```
+
+Backward-compatible module path is still supported:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m interactive_analysis.mcp_server
 ```
 
-Supported MCP methods:
+### Supported MCP methods
 
 - `initialize`
 - `tools/list`
 - `tools/call`
 
-Current tools exposed:
+### Exposed tools
 
 - `start`, `close`, `caps`, `state`
 - `run`, `pause`
@@ -143,7 +155,14 @@ Example `tools/call` arguments:
 - `send_bytes` (required `data`)
 ```json
 {
-  "data": "1\n"
+  "data": "1\\n"
+}
+```
+
+- `send_bytes` (raw bytes via hex)
+```json
+{
+  "data_hex": "040000000680ffffffffffff"
 }
 ```
 
@@ -154,7 +173,7 @@ Example `tools/call` arguments:
 }
 ```
 
-- `send_file` (required `path`)
+- `send_file` (required `path`, streams raw file bytes)
 ```json
 {
   "path": "/tmp/pov_input.txt",
@@ -165,7 +184,8 @@ Example `tools/call` arguments:
 - `stdout` / `stderr`
 ```json
 {
-  "max_chars": 4096
+  "max_chars": 4096,
+  "wait_ms": 150
 }
 ```
 
@@ -174,8 +194,17 @@ Example `tools/call` arguments:
 ### MCP troubleshooting
 
 - `send_bytes` appears stuck:
-  Call includes no `data`. Always send `{"data":"...\\n"}`.
+  Call includes neither `data` nor `data_hex`. Send `{"data":"...\\n"}` for text or `{"data_hex":"..."}` for raw bytes.
+- `run` returns timeout:
+  This is often expected for interactive flows (waiting for input or breakpoint condition). Treat as non-fatal and immediately check `stdout`, `stderr`, and `state`.
 - Session is `idle` and target is not running:
-  Use `start` (MCP now defaults to launch mode), then `run`.
+  Use `start` (defaults to launch mode), then `run`.
 - Large multiline payloads fail in tool UI:
   Use `send_file` (preferred) or split into multiple `send_bytes` calls.
+
+## Reference Docs
+
+- [design.md](design.md)
+- [docs/live_backend_contract.md](docs/live_backend_contract.md)
+- [docs/LLM_PLAYBOOK.md](docs/LLM_PLAYBOOK.md)
+- [docs/project_plan.md](docs/project_plan.md)

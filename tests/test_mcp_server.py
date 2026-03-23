@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from interactive_analysis.errors import InvalidStateError
+import json
+
+from interactive_analysis.errors import InvalidStateError, SessionTimeoutError
 from interactive_analysis.mcp_server import InteractiveAnalysisMcpServer
 
 
@@ -9,7 +11,7 @@ class FakeSession:
         self.started = False
         self.last_qemu_config = None
         self.close_calls = 0
-        self.stdin_written = ""
+        self.stdin_written = b""
         self.stdout_cursors: list[int] = []
         self.stderr_cursors: list[int] = []
 
@@ -73,8 +75,12 @@ class FakeSession:
         return {"ok": True, "command": "advance_basic_blocks", "result": {"count": count, "timeout": timeout}}
 
     def write_stdin(self, data):  # noqa: ANN001
-        self.stdin_written += data
-        return {"ok": True, "command": "write_stdin", "result": {"written": len(data)}}
+        if isinstance(data, str):
+            payload = data.encode("utf-8")
+        else:
+            payload = data
+        self.stdin_written += payload
+        return {"ok": True, "command": "write_stdin", "result": {"written": len(payload)}}
 
     def read_stdout(self, cursor=0, max_chars=4096):  # noqa: ANN001
         self.stdout_cursors.append(cursor)
@@ -154,6 +160,60 @@ def test_mcp_tool_call_start() -> None:
     result = response["result"]
     assert result["isError"] is False
     assert result["structuredContent"]["result"]["target"] == "/tmp/a.out"
+
+
+def test_mcp_tool_call_start_rejects_empty_target() -> None:
+    server = _server()
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 300,
+            "method": "tools/call",
+            "params": {
+                "name": "start",
+                "arguments": {"target": "   "},
+            },
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is True
+    text = response["result"]["content"][0]["text"]
+    assert "non-empty" in text
+
+
+def test_mcp_tool_call_start_rejects_malformed_placeholder_target() -> None:
+    server = _server()
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 302,
+            "method": "tools/call",
+            "params": {
+                "name": "start",
+                "arguments": {"target": ","},
+            },
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is True
+    text = response["result"]["content"][0]["text"]
+    assert "target appears malformed" in text
+
+
+def test_mcp_tool_call_start_rejects_invalid_args_type() -> None:
+    server = _server()
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 301,
+            "method": "tools/call",
+            "params": {"name": "start", "arguments": {"target": "/tmp/a.out", "args": "oops"}},
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is True
+    text = response["result"]["content"][0]["text"]
+    assert "args must be an array of strings" in text
 
 
 def test_mcp_tool_call_start_defaults_launch_true() -> None:
@@ -257,7 +317,7 @@ def test_mcp_tool_call_send_line_appends_newline() -> None:
     )
     assert response is not None
     assert response["result"]["isError"] is False
-    assert fake.stdin_written == "hello\n"
+    assert fake.stdin_written == b"hello\n"
 
 
 def test_mcp_tool_call_send_line_without_line_sends_newline_only() -> None:
@@ -273,14 +333,14 @@ def test_mcp_tool_call_send_line_without_line_sends_newline_only() -> None:
     )
     assert response is not None
     assert response["result"]["isError"] is False
-    assert fake.stdin_written == "\n"
+    assert fake.stdin_written == b"\n"
 
 
 def test_mcp_tool_call_send_file(tmp_path) -> None:  # noqa: ANN001
     fake = FakeSession()
     server = InteractiveAnalysisMcpServer(session_factory=lambda: fake)
-    payload = tmp_path / "payload.txt"
-    payload.write_text("A\nB", encoding="utf-8")
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"A\n\x80\xffB")
 
     response = server.handle_request(
         {
@@ -295,8 +355,73 @@ def test_mcp_tool_call_send_file(tmp_path) -> None:  # noqa: ANN001
     )
     assert response is not None
     assert response["result"]["isError"] is False
-    assert fake.stdin_written == "A\nB\n"
-    assert response["result"]["structuredContent"]["written"] == 4
+    assert fake.stdin_written == b"A\n\x80\xffB\n"
+    assert response["result"]["structuredContent"]["written"] == 6
+
+
+def test_mcp_tool_call_send_bytes_data_hex() -> None:
+    fake = FakeSession()
+    server = InteractiveAnalysisMcpServer(session_factory=lambda: fake)
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 576,
+            "method": "tools/call",
+            "params": {"name": "send_bytes", "arguments": {"data_hex": "040000000680ffffffffffff"}},
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is False
+    assert fake.stdin_written == bytes.fromhex("040000000680ffffffffffff")
+    assert response["result"]["structuredContent"]["result"]["written"] == 12
+
+
+def test_mcp_tool_call_run_rejects_nonpositive_timeout() -> None:
+    server = _server()
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 577,
+            "method": "tools/call",
+            "params": {"name": "run", "arguments": {"timeout": 0}},
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is True
+    text = response["result"]["content"][0]["text"]
+    assert "timeout must be > 0" in text
+
+
+def test_mcp_tool_call_regs_rejects_non_string_names() -> None:
+    server = _server()
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 578,
+            "method": "tools/call",
+            "params": {"name": "regs", "arguments": {"names": ["rip", 1]}},
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is True
+    text = response["result"]["content"][0]["text"]
+    assert "names must be an array of strings" in text
+
+
+def test_mcp_tool_call_mem_rejects_negative_size() -> None:
+    server = _server()
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 579,
+            "method": "tools/call",
+            "params": {"name": "mem", "arguments": {"address": "0x401000", "size": -1}},
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is True
+    text = response["result"]["content"][0]["text"]
+    assert "size must be >= 0" in text
 
 
 def test_mcp_stdout_uses_internal_cursor_progression() -> None:
@@ -320,6 +445,22 @@ def test_mcp_stdout_uses_internal_cursor_progression() -> None:
     )
     assert first is not None and second is not None
     assert fake.stdout_cursors == [0, 3]
+
+
+def test_mcp_stdout_rejects_negative_wait_ms() -> None:
+    server = _server()
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 580,
+            "method": "tools/call",
+            "params": {"name": "stdout", "arguments": {"wait_ms": -1}},
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is True
+    text = response["result"]["content"][0]["text"]
+    assert "wait_ms must be >= 0" in text
 
 
 def test_mcp_tool_call_resume() -> None:
@@ -356,6 +497,58 @@ def test_mcp_tool_call_run_uses_breakpoint_when_configured() -> None:
     assert response["result"]["structuredContent"]["command"] == "bp_run"
 
 
+def test_mcp_tool_call_run_timeout_is_non_fatal() -> None:
+    class TimeoutSession(FakeSession):
+        def resume(self, timeout=5.0):  # noqa: ANN001
+            raise SessionTimeoutError(f"timed out waiting for run condition ({timeout}s)")
+
+    server = InteractiveAnalysisMcpServer(session_factory=TimeoutSession)
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 602,
+            "method": "tools/call",
+            "params": {"name": "run", "arguments": {"timeout": 2.0}},
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is False
+    text_payload = json.loads(response["result"]["content"][0]["text"])
+    assert text_payload["command"] == "run"
+    assert text_payload["ok"] is False
+    assert text_payload["result"]["timed_out"] is True
+    payload = response["result"]["structuredContent"]
+    assert payload["command"] == "run"
+    assert payload["result"]["timed_out"] is True
+    assert payload["result"]["timeout"] == 2.0
+
+
+def test_mcp_tool_call_pause_timeout_is_non_fatal() -> None:
+    class TimeoutSession(FakeSession):
+        def pause(self, timeout=5.0):  # noqa: ANN001
+            raise SessionTimeoutError(f"timed out waiting for pause acknowledgement ({timeout}s)")
+
+    server = InteractiveAnalysisMcpServer(session_factory=TimeoutSession)
+    response = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 603,
+            "method": "tools/call",
+            "params": {"name": "pause", "arguments": {"timeout": 2.0}},
+        }
+    )
+    assert response is not None
+    assert response["result"]["isError"] is False
+    text_payload = json.loads(response["result"]["content"][0]["text"])
+    assert text_payload["command"] == "pause"
+    assert text_payload["ok"] is False
+    assert text_payload["result"]["timed_out"] is True
+    payload = response["result"]["structuredContent"]
+    assert payload["command"] == "pause"
+    assert payload["result"]["timed_out"] is True
+    assert payload["result"]["timeout"] == 2.0
+
+
 def test_mcp_tool_call_bp_add() -> None:
     server = _server()
     response = server.handle_request(
@@ -384,3 +577,51 @@ def test_mcp_tool_call_syms() -> None:
     assert response is not None
     assert response["result"]["isError"] is False
     assert response["result"]["structuredContent"]["result"]["symbols"][0]["name"] == "main"
+
+
+def test_mcp_state_and_streams_include_json_text_for_text_only_clients() -> None:
+    server = _server()
+    state = server.handle_request(
+        {"jsonrpc": "2.0", "id": 901, "method": "tools/call", "params": {"name": "state", "arguments": {}}}
+    )
+    stdout = server.handle_request(
+        {"jsonrpc": "2.0", "id": 902, "method": "tools/call", "params": {"name": "stdout", "arguments": {}}}
+    )
+    assert state is not None and stdout is not None
+    state_text = state["result"]["content"][0]["text"]
+    stdout_text = stdout["result"]["content"][0]["text"]
+    state_payload = json.loads(state_text)
+    stdout_payload = json.loads(stdout_text)
+    assert state_payload["command"] == "get_state"
+    assert state_payload["result"]["session_status"] == "paused"
+    assert stdout_payload["command"] == "read_stdout"
+    assert stdout_payload["result"]["data"] == "abc"
+
+
+def test_mcp_syms_includes_json_text_for_text_only_clients() -> None:
+    server = _server()
+    syms = server.handle_request(
+        {"jsonrpc": "2.0", "id": 903, "method": "tools/call", "params": {"name": "syms", "arguments": {}}}
+    )
+    assert syms is not None
+    syms_text = syms["result"]["content"][0]["text"]
+    syms_payload = json.loads(syms_text)
+    assert syms_payload["command"] == "symbols"
+    assert syms_payload["result"]["symbols"][0]["loaded_address"] == "0x401000"
+
+
+def test_mcp_bp_add_includes_json_text_for_text_only_clients() -> None:
+    server = _server()
+    result = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 904,
+            "method": "tools/call",
+            "params": {"name": "bp_add", "arguments": {"address": "0x401000"}},
+        }
+    )
+    assert result is not None
+    text_payload = json.loads(result["result"]["content"][0]["text"])
+    assert text_payload["command"] == "bp_add"
+    assert text_payload["ok"] is True
+    assert text_payload["result"]["address"] == "0x401000"
