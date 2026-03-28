@@ -118,13 +118,15 @@ class FakeInstrumentationRpcClient:
     def __init__(self, instrumentation_client: FakeInstrumentationClient | None = None) -> None:
         self.connected = False
         self.requests: list[tuple[str, dict]] = []
+        self.request_timeouts: list[tuple[str, float | None]] = []
         self.instrumentation_client = instrumentation_client
 
     def connect(self) -> None:
         self.connected = True
 
-    def request(self, method: str, params: dict | None = None) -> dict:
+    def request(self, method: str, params: dict | None = None, timeout: float | None = None) -> dict:
         params = dict(params or {})
+        self.request_timeouts.append((method, timeout))
         if method != "capabilities":
             self.requests.append((method, params))
         if method == "capabilities":
@@ -235,13 +237,15 @@ class ExitedProcess:
 
 
 class FailingInstrumentationRpcClient(FakeInstrumentationRpcClient):
-    def request(self, method: str, params: dict | None = None) -> dict:
+    def request(self, method: str, params: dict | None = None, timeout: float | None = None) -> dict:
+        del timeout
         self.requests.append((method, dict(params or {})))
         raise RuntimeError("instrumentation RPC connection closed")
 
 
 class BadProtocolInstrumentationRpcClient(FakeInstrumentationRpcClient):
-    def request(self, method: str, params: dict | None = None) -> dict:
+    def request(self, method: str, params: dict | None = None, timeout: float | None = None) -> dict:
+        del timeout
         if method == "capabilities":
             return {"protocol_version": 99}
         return super().request(method, params)
@@ -328,6 +332,7 @@ def test_backend_advance_basic_blocks_uses_rpc_method() -> None:
     result = backend.advance_basic_blocks(1, timeout=1.0)
 
     assert rpc.requests[-1] == ("resume_until_basic_block", {"count": 1})
+    assert rpc.request_timeouts[-1] == ("resume_until_basic_block", 1.0)
     assert result["result"]["blocks_executed"] == 1
     assert result["state"]["pc"] == "0x401010"
 
@@ -344,8 +349,12 @@ def test_backend_run_until_address_uses_rpc_in_rpc_only_mode() -> None:
     result = backend.run_until_address("0x401000", timeout=1.0)
 
     assert rpc.requests[-1] == ("resume_until_address", {"address": "0x401000"})
+    assert rpc.request_timeouts[-1] == ("resume_until_address", 1.0)
     assert result["result"]["matched_address"] == "0x401000"
     assert result["state"]["pc"] == "0x401000"
+    assert result["state"]["last_rpc_method"] == "resume_until_address"
+    assert result["state"]["last_rpc_timeout"] == 1.0
+    assert result["state"]["last_stop_transition"]["reason"] == "run_until_address"
 
 
 def test_backend_run_until_address_returns_immediately_when_already_at_address() -> None:
@@ -393,8 +402,11 @@ def test_backend_step_uses_rpc_in_rpc_only_mode() -> None:
     result = backend.step(2, timeout=1.0)
 
     assert rpc.requests[-1] == ("single_step", {"count": 2})
+    assert rpc.request_timeouts[-1] == ("single_step", 1.0)
     assert result["result"]["executed"] == 2
     assert result["state"]["pc"] == "0x401004"
+    assert result["state"]["last_rpc_method"] == "single_step"
+    assert result["state"]["last_stop_transition"]["reason"] == "single_step"
 
 
 def test_backend_rpc_failure_includes_process_exit_summary() -> None:

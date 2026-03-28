@@ -65,3 +65,15 @@ def test_instrumentation_rpc_client_raises_on_error(monkeypatch) -> None:
     client.connect()
     with pytest.raises(InstrumentationRpcError):
         client.request("get_registers")
+
+
+def test_instrumentation_rpc_client_request_overrides_timeout(monkeypatch) -> None:
+    fake_socket = FakeSocket(['{"id":1,"result":{"status":"paused"}}\n'])
+    monkeypatch.setattr("socket.socket", lambda *args, **kwargs: fake_socket)
+
+    client = InstrumentationRpcClient("/tmp/instrument.sock", timeout=2.0)
+    client.connect()
+    _ = client.request("resume_until_address", {"address": "0x401000"}, timeout=7.5)
+    client.close()
+
+    assert fake_socket.timeout == 7.5

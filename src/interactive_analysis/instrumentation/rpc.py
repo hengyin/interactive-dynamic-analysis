@@ -63,9 +63,20 @@ class InstrumentationRpcClient:
             self._socket.close()
             self._socket = None
 
-    def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         if self._socket is None or self._reader is None:
             raise InstrumentationRpcError("instrumentation RPC client is not connected")
+        effective_timeout = self.timeout if timeout is None else float(timeout)
+        if effective_timeout <= 0:
+            raise ValueError("timeout must be > 0")
+        settimeout = getattr(self._socket, "settimeout", None)
+        if callable(settimeout):
+            settimeout(effective_timeout)
         request_id = self._next_id
         self._next_id += 1
         payload = {

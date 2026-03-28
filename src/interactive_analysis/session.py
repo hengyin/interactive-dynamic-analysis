@@ -104,20 +104,21 @@ class AnalysisSession:
         if max_steps < 0:
             raise InvalidStateError("max_steps must be >= 0")
         ordered = sorted(set(self.breakpoints))
-        current_pc: int | None = self._parse_optional_address(self.state.pc)
+        current_pc: int | None = None
+        try:
+            registers = self.get_registers(["rip", "eip", "pc"])["result"].get("registers", {})
+        except Exception:
+            # Keep breakpoint execution usable even if live register reads are unavailable.
+            registers = {}
+        for key in ("rip", "eip", "pc"):
+            value = registers.get(key)
+            parsed = self._parse_optional_address(value)
+            if parsed is not None:
+                current_pc = parsed
+                break
         if current_pc is None:
-            try:
-                registers = self.get_registers(["rip", "eip", "pc"])["result"].get("registers", {})
-            except Exception:
-                # Some runtimes (for example i386 guests) do not support register
-                # reads yet; keep breakpoint execution usable without PC hints.
-                registers = {}
-            for key in ("rip", "eip", "pc"):
-                value = registers.get(key)
-                parsed = self._parse_optional_address(value)
-                if parsed is not None:
-                    current_pc = parsed
-                    break
+            # Fallback for runtimes/channels where live register reads are not available.
+            current_pc = self._parse_optional_address(self.state.pc)
         if current_pc is not None and current_pc in ordered:
             return self._response("bp_run", {"matched_address": hex(current_pc), "selected_address": hex(current_pc), "breakpoints": [hex(item) for item in ordered], "steps": 0})
 

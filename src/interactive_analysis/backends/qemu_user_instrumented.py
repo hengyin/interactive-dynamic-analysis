@@ -39,6 +39,13 @@ class QemuUserInstrumentedBackend:
             "launched_qemu_user_path": None,
             "rpc_protocol_version": None,
             "rpc_capabilities": {},
+            "last_rpc_method": None,
+            "last_rpc_timeout": None,
+            "last_rpc_params": {},
+            "last_rpc_status": None,
+            "last_rpc_error": None,
+            "rpc_history": [],
+            "last_stop_transition": {},
             "recent_events": [],
             "ingestion_stats": {},
             "capabilities": self._capabilities.to_dict(),
@@ -173,27 +180,31 @@ class QemuUserInstrumentedBackend:
         self._started = True
 
     def resume(self, timeout: float) -> dict[str, Any]:
-        del timeout
         self._require_started()
+        before_status = self._state.get("session_status")
+        before_pc = self._state.get("pc")
         if self._instrumentation_rpc is not None:
-            self._rpc_request("resume")
+            self._rpc_request("resume", timeout=timeout)
         elif self._controller is not None:
             self._controller.resume()
         else:
             raise UnsupportedOperationError("backend does not have a control channel configured")
         self._state["session_status"] = "running"
+        self._record_stop_transition("resume", before_status, before_pc)
         return self._response({})
 
     def pause(self, timeout: float) -> dict[str, Any]:
-        del timeout
         self._require_started()
+        before_status = self._state.get("session_status")
+        before_pc = self._state.get("pc")
         if self._instrumentation_rpc is not None:
-            self._rpc_request("pause")
+            self._rpc_request("pause", timeout=timeout)
         elif self._controller is not None:
             self._controller.pause()
         else:
             raise UnsupportedOperationError("backend does not have a control channel configured")
         self._state["session_status"] = "paused"
+        self._record_stop_transition("pause", before_status, before_pc)
         return self._response({})
 
     def run_until_event(self, event_types: list[str], timeout: float) -> dict[str, Any]:
@@ -232,19 +243,23 @@ class QemuUserInstrumentedBackend:
         self._require_started()
         if not self._capabilities.run_until_address:
             raise UnsupportedOperationError("backend does not support run_until_address")
+        before_status = self._state.get("session_status")
+        before_pc = self._state.get("pc")
         if self._instrumentation is None:
             current_pc = self._state.get("pc")
             if isinstance(current_pc, str) and current_pc.lower() == address.lower():
                 self._state["session_status"] = "paused"
                 self._state["pc"] = current_pc.lower()
+                self._record_stop_transition("run_until_address(already_at_pc)", before_status, before_pc)
                 return self._response({"matched_address": current_pc.lower(), "status": "paused", "pc": current_pc.lower()})
-            result = self._rpc_request("resume_until_address", {"address": address})
+            result = self._rpc_request("resume_until_address", {"address": address}, timeout=timeout)
             status = result.get("status")
             if isinstance(status, str):
                 self._state["session_status"] = status
             pc = result.get("pc")
             if isinstance(pc, str):
                 self._state["pc"] = pc
+            self._record_stop_transition("run_until_address", before_status, before_pc)
             return self._response({"matched_address": address, **result})
         if self._instrumentation is None:
             raise UnsupportedOperationError("backend does not have an instrumentation event channel configured")
@@ -277,32 +292,36 @@ class QemuUserInstrumentedBackend:
         return self._response({"matched_event": matched})
 
     def step(self, count: int, timeout: float) -> dict[str, Any]:
-        del timeout
         self._require_started()
         if not self._capabilities.single_step:
             raise UnsupportedOperationError("backend does not support single stepping")
-        result = self._rpc_request("single_step", {"count": count})
+        before_status = self._state.get("session_status")
+        before_pc = self._state.get("pc")
+        result = self._rpc_request("single_step", {"count": count}, timeout=timeout)
         status = result.get("status")
         if isinstance(status, str):
             self._state["session_status"] = status
         pc = result.get("pc")
         if isinstance(pc, str):
             self._state["pc"] = pc
+        self._record_stop_transition("single_step", before_status, before_pc)
         return self._response(result)
 
     def advance_basic_blocks(self, count: int, timeout: float) -> dict[str, Any]:
-        del timeout
         self._require_started()
-        result = self._rpc_request("resume_until_basic_block", {"count": count})
+        before_status = self._state.get("session_status")
+        before_pc = self._state.get("pc")
+        result = self._rpc_request("resume_until_basic_block", {"count": count}, timeout=timeout)
         status = result.get("status")
         if isinstance(status, str):
             self._state["session_status"] = status
         pc = result.get("pc")
         if isinstance(pc, str):
             self._state["pc"] = pc
+        self._record_stop_transition("resume_until_basic_block", before_status, before_pc)
         return self._response(result)
 
-    def write_stdin(self, data: str) -> dict[str, Any]:
+    def write_stdin(self, data: str | bytes) -> dict[str, Any]:
         self._require_started()
         if self._process_runner is None:
             raise UnsupportedOperationError("backend does not have a launched process")
@@ -469,6 +488,13 @@ class QemuUserInstrumentedBackend:
         self._state["instrumentation_rpc_socket_path"] = None
         self._state["rpc_protocol_version"] = None
         self._state["rpc_capabilities"] = {}
+        self._state["last_rpc_method"] = None
+        self._state["last_rpc_timeout"] = None
+        self._state["last_rpc_params"] = {}
+        self._state["last_rpc_status"] = None
+        self._state["last_rpc_error"] = None
+        self._state["rpc_history"] = []
+        self._state["last_stop_transition"] = {}
         self._state["capabilities"] = self._capabilities.to_dict()
 
     def _response(self, result: dict[str, Any]) -> dict[str, Any]:
@@ -497,11 +523,41 @@ class QemuUserInstrumentedBackend:
             raise UnsupportedOperationError("backend does not have an instrumentation RPC channel configured")
         return self._instrumentation_rpc
 
-    def _rpc_request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _rpc_request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         rpc = self._require_rpc()
+        request_params = dict(params or {})
+        history_entry: dict[str, Any] = {
+            "ts": time.time(),
+            "method": method,
+            "params": request_params,
+            "timeout": timeout,
+            "ok": False,
+        }
+        self._state["last_rpc_method"] = method
+        self._state["last_rpc_timeout"] = timeout
+        self._state["last_rpc_params"] = request_params
+        self._state["last_rpc_error"] = None
         try:
-            return rpc.request(method, params)
+            result = rpc.request(method, params, timeout=timeout)
+            history_entry["ok"] = True
+            status = result.get("status")
+            if isinstance(status, str):
+                self._state["last_rpc_status"] = status
+                history_entry["status"] = status
+            if "pc" in result:
+                history_entry["pc"] = result.get("pc")
+            self._append_rpc_history(history_entry)
+            return result
         except Exception as exc:
+            message = str(exc)
+            self._state["last_rpc_error"] = message
+            history_entry["error"] = message
+            self._append_rpc_history(history_entry)
             process_summary = None
             if self._process_runner is not None:
                 process_summary = self._process_runner.exited_summary()
@@ -546,6 +602,8 @@ class QemuUserInstrumentedBackend:
         returncode = process.poll()
         if returncode is None:
             return
+        before_status = self._state.get("session_status")
+        before_pc = self._state.get("pc")
         self._state["session_status"] = "exited"
         if returncode < 0:
             self._state["exit_signal"] = f"SIG{-returncode}"
@@ -555,6 +613,7 @@ class QemuUserInstrumentedBackend:
             self._state["exit_code"] = int(returncode)
             self._state["exit_signal"] = None
             self._state["stop_reason"] = "exited"
+        self._record_stop_transition("process_exit", before_status, before_pc)
 
     def _ensure_launch_sockets(self, qemu_config: dict[str, Any]) -> dict[str, Any]:
         if qemu_config.get("instrumentation_rpc_socket_path"):
@@ -568,3 +627,24 @@ class QemuUserInstrumentedBackend:
         self._auto_socket_root = root
         qemu_config["instrumentation_rpc_socket_path"] = str(root / "rpc.sock")
         return qemu_config
+
+    def _append_rpc_history(self, entry: dict[str, Any]) -> None:
+        history = self._state.get("rpc_history")
+        if not isinstance(history, list):
+            history = []
+        history.append(entry)
+        if len(history) > 64:
+            del history[:-64]
+        self._state["rpc_history"] = history
+
+    def _record_stop_transition(self, reason: str, before_status: Any, before_pc: Any) -> None:
+        self._state["last_stop_transition"] = {
+            "ts": time.time(),
+            "reason": reason,
+            "before_status": before_status,
+            "after_status": self._state.get("session_status"),
+            "before_pc": before_pc,
+            "after_pc": self._state.get("pc"),
+            "exit_code": self._state.get("exit_code"),
+            "exit_signal": self._state.get("exit_signal"),
+        }

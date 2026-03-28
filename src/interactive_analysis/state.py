@@ -28,6 +28,13 @@ class ExecutionState:
     capabilities: dict[str, bool] = field(default_factory=dict)
     recent_events: list[dict[str, Any]] = field(default_factory=list)
     ingestion_stats: dict[str, int] = field(default_factory=dict)
+    last_rpc_method: str | None = None
+    last_rpc_timeout: float | None = None
+    last_rpc_params: dict[str, Any] = field(default_factory=dict)
+    last_rpc_status: str | None = None
+    last_rpc_error: str | None = None
+    rpc_history: list[dict[str, Any]] = field(default_factory=list)
+    last_stop_transition: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,4 +60,11 @@ class ExecutionState:
             "capabilities": dict(self.capabilities),
             "recent_events": list(self.recent_events),
             "ingestion_stats": dict(self.ingestion_stats),
+            "last_rpc_method": self.last_rpc_method,
+            "last_rpc_timeout": self.last_rpc_timeout,
+            "last_rpc_params": dict(self.last_rpc_params),
+            "last_rpc_status": self.last_rpc_status,
+            "last_rpc_error": self.last_rpc_error,
+            "rpc_history": list(self.rpc_history),
+            "last_stop_transition": dict(self.last_stop_transition),
         }

@@ -169,6 +169,22 @@ def test_session_bp_run_single_breakpoint_uses_run_until_address() -> None:
     assert backend.step_calls == 0
 
 
+def test_session_bp_run_uses_live_pc_not_stale_state_pc() -> None:
+    backend = FakeBackend()
+    session = AnalysisSession(backend=backend)
+    session.state.session_status = "paused"
+    # Stale cached PC appears to be already at breakpoint.
+    session.state.pc = "0x1008"
+    session.bp_add("0x1008")
+
+    result = session.bp_run(timeout=1.0, max_steps=10)
+
+    # Live backend PC is 0x1000, so bp_run must resume to 0x1008
+    # instead of immediately short-circuiting on stale cached state.pc.
+    assert result["result"]["matched_address"] == "0x1008"
+    assert backend.run_until_calls == 1
+
+
 def test_session_bp_run_works_without_register_reads() -> None:
     backend = FakeBackendNoRegisterReads()
     session = AnalysisSession(backend=backend)
